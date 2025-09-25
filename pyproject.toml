@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dex-perp-bot"
+version = "0.1.0"
+description = "Delta-neutral perp DEX bot connectors for Hyperliquid and Aster"
+readme = "README.md"
+authors = [
+  {name = "Dex Perp Bot"}
+]
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.31",
+  "python-dotenv>=1.0",
+  "hyperliquid>=0.4.66",
+  "ccxt>=4.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3",
+  "responses>=0.25",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = [
+  "tests"
+]
