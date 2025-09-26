@@ -27,6 +27,7 @@ class HyperliquidClient:
         self._client = factory(
             {
                 "privateKey": credentials.private_key,
+                "walletAddress": credentials.wallet_address,
             }
         )
 

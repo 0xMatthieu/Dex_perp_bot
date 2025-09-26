@@ -14,6 +14,7 @@ class HyperliquidCredentials:
     """Hyperliquid API authentication bundle."""
 
     private_key: str
+    wallet_address: str
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,7 @@ class Settings:
 
         hyperliquid_credentials = HyperliquidCredentials(
             private_key=_require_env("HYPERLIQUID_PRIVATE_KEY"),
+            wallet_address=_require_env("HYPERLIQUID_ADDRESS_WALLET"),
         )
 
         aster_credentials = AsterCredentials(
