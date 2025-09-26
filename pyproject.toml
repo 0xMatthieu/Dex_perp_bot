@@ -14,8 +14,7 @@ requires-python = ">=3.11"
 dependencies = [
   "requests>=2.31",
   "python-dotenv>=1.0",
-  "hyperliquid>=0.4.66",
-  "ccxt>=4.5",
+  "hyperliquid-python-sdk>=0.3.0",
 ]
 
 [project.optional-dependencies]

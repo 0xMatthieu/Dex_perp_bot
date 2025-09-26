@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 class HyperliquidCredentials:
     """Hyperliquid API authentication bundle."""
 
-    api_key: str
+    private_key: str
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,7 @@ class Settings:
             load_dotenv()
 
         hyperliquid_credentials = HyperliquidCredentials(
-            api_key=_require_env("HYPERLIQUID_API_KEY"),
+            private_key=_require_env("HYPERLIQUID_PRIVATE_KEY"),
         )
 
         aster_credentials = AsterCredentials(

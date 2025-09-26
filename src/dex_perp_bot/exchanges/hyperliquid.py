@@ -2,39 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict
+from typing import Any
 
-from hyperliquid import HyperliquidSync
+from hyperliquid.utils import Client, LocalAccount
 
 from .base import BalanceParsingError, DexAPIError, WalletBalance, to_decimal
 from ..config import HyperliquidCredentials
 
 
-ClientFactory = Callable[[Dict[str, Any]], Any]
-
-
 class HyperliquidClient:
-    """Wrapper around the official Hyperliquid CCXT connector."""
+    """Wrapper around the official Hyperliquid SDK."""
 
     def __init__(
         self,
         credentials: HyperliquidCredentials,
-        *,
-        client_factory: ClientFactory | None = None,
     ) -> None:
         self._credentials = credentials
-        factory = client_factory or HyperliquidSync
-        self._client = factory(
-            {
-                "apiKey": credentials.api_key,
-            }
-        )
+        account = LocalAccount.from_key(credentials.private_key)
+        self._client = Client(account)
 
     def get_wallet_balance(self) -> WalletBalance:
         """Return the wallet balance reported by Hyperliquid."""
 
         try:
-            balance = self._client.fetch_balance()
+            balance = self._client.get_balance()
         except Exception as exc:  # pragma: no cover - defensive
             raise DexAPIError("Failed to fetch Hyperliquid balance") from exc
 
