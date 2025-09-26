@@ -95,7 +95,7 @@ class AsterClient:
         # Put recvWindow first or last � order must match what you sign & send. We keep it first.
         base_items.append(("timeInForce", "GTC"))
         base_items.append(("recvWindow", 5000))
-        base_items.append(("timestamp", self._now_ms()))
+        base_items.append(("timestamp", self.sync_time()))
 
         if params:
             base_items.extend(list(params))  # preserve caller order
