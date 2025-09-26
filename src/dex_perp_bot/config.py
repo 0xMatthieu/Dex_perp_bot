@@ -70,7 +70,7 @@ class Settings:
         )
         aster_config = AsterConfig(
             account_id=os.getenv("ASTER_ACCOUNT_ID"),
-            base_url=_require_env("ASTER_BASE_URL"),
+            base_url=os.getenv("ASTER_BASE_URL", "https://api.prod.asterperp.xyz/api"),
             balance_endpoint=os.getenv("ASTER_BALANCE_ENDPOINT", "/v1/perp/account-summary"),
             response_path=_split_path(os.getenv("ASTER_RESPONSE_PATH", "data.account")),
             available_fields=_split_csv(
