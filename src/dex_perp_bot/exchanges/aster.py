@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import time
 import urllib.parse
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -21,6 +22,9 @@ from .base import (
 from ..config import AsterConfig, AsterCredentials
 
 KeyVals = Sequence[Tuple[str, Any]]
+
+logger = logging.getLogger(__name__)
+
 
 class AsterClient:
     """HTTP client for interacting with the Aster API (fapi.*)."""
@@ -101,8 +105,9 @@ class AsterClient:
         url = f"{self._config.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
         full_query = f"{query_str}&signature={sig}"
 
-        r = self._session.get(f"{url}?{full_query}", headers=self._headers(),
-                              timeout=self._config.request_timeout)
+        full_url = f"{url}?{full_query}"
+        logger.info("Aster GET: %s", full_url)
+        r = self._session.get(full_url, headers=self._headers(), timeout=self._config.request_timeout)
         self._raise_for_json(r)
         return r.json()
 
