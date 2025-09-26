@@ -22,12 +22,13 @@ def test_settings_from_env(monkeypatch):
     settings = Settings.from_env(load_env_file=False)
 
     assert settings.hyperliquid.api_key == "hk"
-    assert settings.aster.base_url == "https://api.aster.test"
-    assert settings.aster.balance_endpoint == "/balance"
-    assert settings.aster.response_path == ("data", "summary")
-    assert settings.aster.available_fields == ("availableBalance", "freeCollateral")
-    assert settings.aster.total_fields == ("totalCollateral",)
-    assert settings.aster.request_timeout == pytest.approx(5.0)
+    assert settings.aster.api_key == "ak"
+    assert settings.aster_config.base_url == "https://api.aster.test"
+    assert settings.aster_config.balance_endpoint == "/balance"
+    assert settings.aster_config.response_path == ("data", "summary")
+    assert settings.aster_config.available_fields == ("availableBalance", "freeCollateral")
+    assert settings.aster_config.total_fields == ("totalCollateral",)
+    assert settings.aster_config.request_timeout == pytest.approx(5.0)
 
 
 def test_settings_missing_env(monkeypatch):

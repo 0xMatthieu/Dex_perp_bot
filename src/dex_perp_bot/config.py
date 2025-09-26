@@ -18,10 +18,16 @@ class HyperliquidCredentials:
 
 @dataclass(frozen=True)
 class AsterCredentials:
-    """Aster API authentication bundle and balance parsing metadata."""
+    """Aster API authentication bundle."""
 
     api_key: str
     api_secret: str
+
+
+@dataclass(frozen=True)
+class AsterConfig:
+    """Aster API configuration and balance parsing metadata."""
+
     account_id: str
     base_url: str
     balance_endpoint: str
@@ -37,6 +43,7 @@ class Settings:
 
     hyperliquid: HyperliquidCredentials
     aster: AsterCredentials
+    aster_config: AsterConfig
 
     @classmethod
     def from_env(cls, *, load_env_file: bool = True) -> "Settings":
@@ -60,6 +67,8 @@ class Settings:
         aster_credentials = AsterCredentials(
             api_key=_require_env("ASTER_API_KEY"),
             api_secret=_require_env("ASTER_API_SECRET"),
+        )
+        aster_config = AsterConfig(
             account_id=_require_env("ASTER_ACCOUNT_ID"),
             base_url=_require_env("ASTER_BASE_URL"),
             balance_endpoint=os.getenv("ASTER_BALANCE_ENDPOINT", "/v1/perp/account-summary"),
@@ -79,7 +88,11 @@ class Settings:
             request_timeout=float(os.getenv("ASTER_TIMEOUT", "10")),
         )
 
-        return cls(hyperliquid=hyperliquid_credentials, aster=aster_credentials)
+        return cls(
+            hyperliquid=hyperliquid_credentials,
+            aster=aster_credentials,
+            aster_config=aster_config,
+        )
 
 
 def _require_env(name: str) -> str:

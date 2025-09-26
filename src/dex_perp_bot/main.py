@@ -26,7 +26,7 @@ def main() -> int:
         return 1
 
     hyperliquid_client = HyperliquidClient(settings.hyperliquid)
-    aster_client = AsterClient(settings.aster)
+    aster_client = AsterClient(settings.aster, settings.aster_config)
 
     summary: Dict[str, Any] = {}
 
