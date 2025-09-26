@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
-from hyperliquid.info import Info
-from hyperliquid.utils.constants import MAINNET_API_URL
+import requests
 from hyperliquid.utils.signing import LocalAccount
 
 from .base import BalanceParsingError, DexAPIError, WalletBalance, to_decimal
@@ -18,18 +17,29 @@ class HyperliquidClient:
     def __init__(
         self,
         credentials: HyperliquidCredentials,
+        *,
+        session: Optional[requests.Session] = None,
     ) -> None:
         self._credentials = credentials
         self._account = LocalAccount.from_key(credentials.private_key)
-        self._info = Info(MAINNET_API_URL, skip_ws=True)
+        self._info_url = "https://api.hyperliquid.xyz/info"
+        self._session = session or requests.Session()
 
     def get_wallet_balance(self) -> WalletBalance:
         """Return the wallet balance reported by Hyperliquid."""
 
+        payload = {
+            "type": "userState",
+            "user": self._account.address,
+        }
         try:
-            balance = self._info.user_state(self._account.address)
-        except Exception as exc:  # pragma: no cover - defensive
+            response = self._session.post(self._info_url, json=payload, timeout=10)
+            response.raise_for_status()
+            balance = response.json()
+        except requests.RequestException as exc:  # pragma: no cover - defensive
             raise DexAPIError("Failed to fetch Hyperliquid balance") from exc
+        except ValueError as exc:  # pragma: no cover - defensive
+            raise DexAPIError("Failed to decode JSON response from Hyperliquid") from exc
 
         margin_summary = balance.get("marginSummary") if isinstance(balance, dict) else None
         if not isinstance(margin_summary, dict):
