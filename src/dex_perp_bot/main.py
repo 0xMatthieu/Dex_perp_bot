@@ -8,7 +8,7 @@ from typing import Any, Dict
 
 from .config import Settings
 from .exchanges.aster import AsterClient
-from .exchanges.base import DexClientError
+from .exchanges.base import DexClientError, DexAPIError
 from .exchanges.hyperliquid import HyperliquidClient
 
 logger = logging.getLogger(__name__)
