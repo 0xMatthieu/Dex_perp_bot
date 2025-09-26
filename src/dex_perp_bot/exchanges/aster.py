@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import json
 import time
-from typing import Any, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import requests
 
@@ -38,7 +38,9 @@ class AsterClient:
     def get_wallet_balance(self) -> WalletBalance:
         """Fetch the account summary and return the parsed balance."""
 
-        payload = {"account": self._config.account_id}
+        payload: Dict[str, Any] = {}
+        if self._config.account_id:
+            payload["account"] = self._config.account_id
         response = self._post(self._config.balance_endpoint, payload)
         account_data = self._extract_account_data(response)
 

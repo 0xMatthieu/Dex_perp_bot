@@ -8,7 +8,6 @@ def test_settings_from_env(monkeypatch):
         "HYPERLIQUID_API_KEY": "hk",
         "ASTER_API_KEY": "ak",
         "ASTER_API_SECRET": "as",
-        "ASTER_ACCOUNT_ID": "acct-1",
         "ASTER_BASE_URL": "https://api.aster.test",
         "ASTER_BALANCE_ENDPOINT": "/balance",
         "ASTER_RESPONSE_PATH": "data.summary",
@@ -23,6 +22,7 @@ def test_settings_from_env(monkeypatch):
 
     assert settings.hyperliquid.api_key == "hk"
     assert settings.aster.api_key == "ak"
+    assert settings.aster_config.account_id is None
     assert settings.aster_config.base_url == "https://api.aster.test"
     assert settings.aster_config.balance_endpoint == "/balance"
     assert settings.aster_config.response_path == ("data", "summary")

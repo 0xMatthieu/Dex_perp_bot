@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 import pytest
@@ -52,6 +53,7 @@ def test_aster_balance_parsing(credentials, config):
     assert balance.total == Decimal("200.75")
 
     req = responses.calls[0].request
+    assert json.loads(req.body) == {"account": "acct-1"}
     assert req.headers["X-API-KEY"] == "key"
     assert req.headers["X-TIMESTAMP"]
     assert req.headers["X-SIGNATURE"]
@@ -70,4 +72,39 @@ def test_aster_missing_fields(credentials, config):
 
     with pytest.raises(BalanceParsingError):
         client.get_wallet_balance()
+
+
+@responses.activate
+def test_aster_balance_parsing_no_account_id(credentials, config):
+    no_account_config = AsterConfig(
+        account_id=None,
+        base_url=config.base_url,
+        balance_endpoint=config.balance_endpoint,
+        response_path=config.response_path,
+        available_fields=config.available_fields,
+        total_fields=config.total_fields,
+        request_timeout=config.request_timeout,
+    )
+    responses.add(
+        responses.POST,
+        "https://api.aster.test/account-summary",
+        json={
+            "data": {
+                "account": {
+                    "availableBalance": "50.5",
+                    "totalCollateral": "200.75",
+                }
+            }
+        },
+        status=200,
+    )
+
+    client = AsterClient(credentials, no_account_config)
+    balance = client.get_wallet_balance()
+
+    assert balance.available == Decimal("50.5")
+    assert balance.total == Decimal("200.75")
+
+    req = responses.calls[0].request
+    assert req.body == b"{}"
 

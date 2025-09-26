@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 import os
 
 from dotenv import load_dotenv
@@ -28,7 +28,7 @@ class AsterCredentials:
 class AsterConfig:
     """Aster API configuration and balance parsing metadata."""
 
-    account_id: str
+    account_id: Optional[str]
     base_url: str
     balance_endpoint: str
     response_path: Tuple[str, ...]
@@ -69,7 +69,7 @@ class Settings:
             api_secret=_require_env("ASTER_API_SECRET"),
         )
         aster_config = AsterConfig(
-            account_id=_require_env("ASTER_ACCOUNT_ID"),
+            account_id=os.getenv("ASTER_ACCOUNT_ID"),
             base_url=_require_env("ASTER_BASE_URL"),
             balance_endpoint=os.getenv("ASTER_BALANCE_ENDPOINT", "/v1/perp/account-summary"),
             response_path=_split_path(os.getenv("ASTER_RESPONSE_PATH", "data.account")),
