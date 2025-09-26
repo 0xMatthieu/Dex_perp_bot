@@ -28,6 +28,12 @@ def main() -> int:
     hyperliquid_client = HyperliquidClient(settings.hyperliquid)
     aster_client = AsterClient(settings.aster, settings.aster_config)
 
+    try:
+        logger.info("Synchronizing time with Aster API...")
+        aster_client.sync_time()
+    except DexAPIError as exc:
+        logger.error("Failed to sync time with Aster, balance query will likely fail: %s", exc)
+
     summary: Dict[str, Any] = {}
 
     for venue, client in ("hyperliquid", hyperliquid_client), ("aster", aster_client):

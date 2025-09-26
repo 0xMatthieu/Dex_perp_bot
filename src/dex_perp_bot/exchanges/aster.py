@@ -41,10 +41,13 @@ class AsterClient:
     def sync_time(self) -> None:
         """GET /fapi/v1/time and cache the offset (serverTime - now)."""
         url = f"{self._config.base_url.rstrip('/')}/fapi/v1/time"
-        r = self._session.get(url, timeout=self._config.request_timeout)
-        r.raise_for_status()
-        server = int(r.json()["serverTime"])
-        self._time_offset_ms = server - int(time.time() * 1000)
+        try:
+            r = self._session.get(url, timeout=self._config.request_timeout)
+            r.raise_for_status()
+            server = int(r.json()["serverTime"])
+            self._time_offset_ms = server - int(time.time() * 1000)
+        except (requests.RequestException, ValueError) as exc:
+            raise DexAPIError("Failed to sync time with Aster") from exc
 
     def _now_ms(self) -> int:
         return int(time.time() * 1000) + self._time_offset_ms
