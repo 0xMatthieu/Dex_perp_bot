@@ -101,6 +101,7 @@ class AsterClient:
             base_items.extend(list(params))  # preserve caller order
 
         query_str = self._urlencode(base_items)
+        logger.info("Signing payload: %s", query_str)
         sig = self._sign(query_str)
 
         # signature MUST be last
@@ -143,6 +144,7 @@ class AsterClient:
         else:
             total_params = query_str or body_str  # exactly one side
 
+        logger.info("Signing payload: %s", total_params)
         signature = self._sign(total_params)
 
         url = f"{self._config.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
