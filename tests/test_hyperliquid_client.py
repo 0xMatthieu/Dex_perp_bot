@@ -10,7 +10,7 @@ from dex_perp_bot.exchanges.hyperliquid import HyperliquidClient
 
 @pytest.fixture
 def credentials() -> HyperliquidCredentials:
-    return HyperliquidCredentials(api_key="key", api_secret="secret", wallet_address="0xabc")
+    return HyperliquidCredentials(api_key="key")
 
 
 def test_hyperliquid_balance_parsing(credentials):
