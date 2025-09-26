@@ -92,10 +92,11 @@ class AsterClient:
     # -------- GET SIGNED (query only) --------
     def _get_signed(self, endpoint: str, params: Optional[KeyVals] = None) -> Mapping[str, Any]:
         base_items: List[Tuple[str, Any]] = []
-        # Put recvWindow first or last — order must match what you sign & send. We keep it first.
+        # Put recvWindow first or last ï¿½ order must match what you sign & send. We keep it first.
+        base_items.append(("timeInForce", "GTC"))
         base_items.append(("recvWindow", 5000))
         base_items.append(("timestamp", self._now_ms()))
-        base_items.append(("timeInForce", "GTC"))
+
         if params:
             base_items.extend(list(params))  # preserve caller order
 
