@@ -35,17 +35,21 @@ class AsterClient:
         self._credentials = credentials
         self._config = config
         self._session = session or requests.Session()
-        self._time_offset_ms = 0  # server - local
+        self._time_offset_ms = 0  # serverTime - local
 
+    # -------- Time sync (fix -1021) --------
     def sync_time(self) -> None:
         """GET /fapi/v1/time and cache the offset (serverTime - now)."""
         url = f"{self._config.base_url.rstrip('/')}/fapi/v1/time"
         r = self._session.get(url, timeout=self._config.request_timeout)
         r.raise_for_status()
-        server_time = int(r.json()["serverTime"])
-        now = int(time.time() * 1000)
-        self._time_offset_ms = server_time - now
+        server = int(r.json()["serverTime"])
+        self._time_offset_ms = server - int(time.time() * 1000)
 
+    def _now_ms(self) -> int:
+        return int(time.time() * 1000) + self._time_offset_ms
+
+    # -------- Signing primitives (Binance-style) --------
     def _urlencode(self, items: KeyVals) -> str:
         # EXACT encoding used to sign & send
         return urllib.parse.urlencode(items, doseq=True)
@@ -65,14 +69,7 @@ class AsterClient:
         - total fields: totalWalletBalance / totalMarginBalance
         - available fields: availableBalance / maxWithdrawAmount / totalMarginBalance
         """
-        # Aster SIGNED endpoints require timestamp (ms) and signature over the query string.
-        params: Dict[str, Any] = {
-            "timestamp": int(time.time() * 1000) + self._time_offset_ms,
-            # optional but recommended to mitigate drift
-            "recvWindow": 5000,
-        }
-
-        response = self._get_signed(self._config.balance_endpoint, params)
+        response = self._get_signed(self._config.balance_endpoint, params=[])
         account_data = self._extract_account_data(response)
 
         total = to_decimal(find_first_key(account_data, self._config.total_fields))
@@ -85,40 +82,99 @@ class AsterClient:
 
         return WalletBalance(total=total, available=available, raw=response)
 
-    # ------------------------------------------------------------------
-    # Internal helpers
+    # -------- GET SIGNED (query only) --------
+    def _get_signed(self, endpoint: str, params: Optional[KeyVals] = None) -> Mapping[str, Any]:
+        base_items: List[Tuple[str, Any]] = []
+        # Put recvWindow first or last — order must match what you sign & send. We keep it first.
+        base_items.append(("recvWindow", 5000))
+        base_items.append(("timestamp", self._now_ms()))
+        if params:
+            base_items.extend(list(params))  # preserve caller order
 
-    def _get_signed(self, endpoint: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
-        """
-        Signed GET per Aster docs:
-        - Build query string in the exact order you send
-        - signature = HMAC_SHA256(secretKey, queryString)
-        - Header: X-MBX-APIKEY
-        """
+        query_str = self._urlencode(base_items)
+        sig = self._sign(query_str)
+
+        # signature MUST be last
         url = f"{self._config.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
-        query = urllib.parse.urlencode(params, doseq=True)
-        signature = self._sign(query)
+        full_query = f"{query_str}&signature={sig}"
 
-        headers = {"X-MBX-APIKEY": self._credentials.api_key}
-        full_params = dict(params)
-        full_params["signature"] = signature
+        r = self._session.get(f"{url}?{full_query}", headers=self._headers(),
+                              timeout=self._config.request_timeout)
+        self._raise_for_json(r)
+        return r.json()
 
-        try:
-            r = self._session.get(
-                url, params=full_params, headers=headers, timeout=self._config.request_timeout
+    # -------- POST SIGNED (supports body, query, or mixed per docs) --------
+    def _post_signed(
+        self,
+        endpoint: str,
+        *,
+        query: Optional[KeyVals] = None,
+        body: Optional[KeyVals] = None,
+        signature_location: str = "body",  # "body" | "query"
+    ) -> Mapping[str, Any]:
+        """
+        Implements: totalParams = urlencode(query) + ('&' if both) + urlencode(body)
+        Signs totalParams. Sends url-encoded (not JSON) like Binance/Aster examples.
+        Ensures signature is the LAST param in the chosen location.
+        """
+        q_items: List[Tuple[str, Any]] = [("recvWindow", 5000), ("timestamp", self._now_ms())]
+        if query:
+            q_items.extend(list(query))
+
+        b_items: List[Tuple[str, Any]] = []
+        if body:
+            b_items.extend(list(body))
+
+        query_str = self._urlencode(q_items)
+        body_str = self._urlencode(b_items) if b_items else ""
+
+        if query_str and body_str:
+            total_params = f"{query_str}&{body_str}"
+        else:
+            total_params = query_str or body_str  # exactly one side
+
+        signature = self._sign(total_params)
+
+        url = f"{self._config.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+        headers = {
+            **self._headers(),
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+
+        if signature_location == "query":
+            # signature last in query
+            q_to_send = query_str + ("&signature=" + signature if query_str else "signature=" + signature)
+            r = self._session.post(
+                f"{url}?{q_to_send}",
+                data=body_str,  # may be empty; still form-encoded
+                headers=headers,
+                timeout=self._config.request_timeout,
             )
-            r.raise_for_status()
-        except requests.RequestException as exc:  # pragma: no cover
-            raise DexAPIError(f"Aster request failed: {exc}") from exc
+        else:
+            # signature last in body
+            if body_str:
+                body_to_send = f"{body_str}&signature={signature}"
+            else:
+                body_to_send = f"signature={signature}"
+            r = self._session.post(
+                f"{url}?{query_str}" if query_str else url,
+                data=body_to_send,
+                headers=headers,
+                timeout=self._config.request_timeout,
+            )
 
+        self._raise_for_json(r)
+        return r.json()
+
+    def _raise_for_json(self, r: requests.Response) -> None:
         try:
-            return r.json()
-        except ValueError as exc:  # pragma: no cover
-            raise DexAPIError("Failed to decode JSON response from Aster") from exc
-
-    def _sign(self, query_string: str) -> str:
-        secret = self._credentials.api_secret.encode("utf-8")
-        return hmac.new(secret, query_string.encode("utf-8"), hashlib.sha256).hexdigest()
+            r.raise_for_status()
+        except requests.HTTPError as exc:
+            try:
+                err = r.json()
+            except ValueError:
+                err = {"raw": r.text}
+            raise DexAPIError(f"Aster HTTP {r.status_code}: {err}") from exc
 
     def _extract_account_data(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         # If response_path is empty, use the whole payload (v4/account is top-level)
