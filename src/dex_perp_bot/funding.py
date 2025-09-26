@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import requests
+from hyperliquid import HyperliquidSync
 
 __all__ = [
     "FundingRate",
@@ -117,41 +118,21 @@ def fetch_hyperliquid_funding(
     Raises:
         FundingQueryError: If the request fails or the response cannot be parsed.
     """
-
-    close_session = session is None
-    session = _ensure_session(session)
-
-    payload = {
-        "type": "fundingHistory",
-        "coin": market,
-        "startTime": int((time.time() - lookback_seconds) * 1000),
-    }
-
-    logger.debug("Requesting Hyperliquid funding: %s", payload)
+    client = HyperliquidSync()
+    since = int((time.time() - lookback_seconds) * 1000)
 
     try:
-        response = session.post(
-            _HYPERLIQUID_INFO_URL,
-            json=payload,
-            timeout=_REQUEST_TIMEOUT,
-        )
-        response.raise_for_status()
-    except requests.RequestException as exc:  # pragma: no cover - network failure
+        # The session argument is ignored since we are not using requests here
+        # anymore. The client will manage its own connection pooling.
+        history = client.fetch_funding_history(symbol=market, since=since)
+    except Exception as exc:
         raise FundingQueryError("Hyperliquid funding request failed") from exc
-    finally:
-        if close_session:
-            session.close()
 
-    data = response.json()
-    if isinstance(data, dict) and "data" in data:
-        data = data["data"]
-    latest = _latest_entry(data)
+    if not history:
+        raise FundingQueryError("Funding response did not include any entries")
 
-    rate = (
-        latest.get("fundingRate")
-        or latest.get("funding_rate")
-        or latest.get("rate")
-    )
+    latest = history[-1]  # Already sorted by time
+    rate = latest.get("fundingRate")
     funding_rate = _maybe_to_float(rate)
 
     return FundingRate(
