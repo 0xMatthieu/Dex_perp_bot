@@ -51,7 +51,8 @@ class HyperliquidClient:
     def get_predicted_funding_rates(self) -> List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]]:
         """Retrieve predicted funding rates for different venues."""
         try:
-            rates = self._client.info({"type": "predictedFundings"})
+            # The underlying CCXT client exposes public POST methods.
+            rates = self._client.publicPostInfo({"type": "predictedFundings"})
         except Exception as exc:  # pragma: no cover - defensive
             raise DexAPIError("Failed to fetch Hyperliquid predicted funding rates") from exc
         return rates
