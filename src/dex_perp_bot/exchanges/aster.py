@@ -9,7 +9,7 @@ import time
 import urllib.parse
 import uuid
 from decimal import Decimal, InvalidOperation
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import requests
 
@@ -120,6 +120,91 @@ class AsterClient:
             return response.json()
         except requests.RequestException as exc:  # pragma: no cover - network failure
             raise DexAPIError(f"Aster funding rate request to {endpoint} failed") from exc
+
+    def get_price(self, symbol: str) -> Decimal:
+        """Fetch the latest mark price for a symbol."""
+        logger.debug("Fetching ticker price for %s", symbol)
+        price_info = self._get_public("/fapi/v1/ticker/price", params={"symbol": symbol})
+        return Decimal(price_info["price"])
+
+    def get_symbol_filters(self, symbol: str) -> Dict[str, Decimal]:
+        """Fetch and return price/lot/notional filters for a symbol."""
+        logger.debug("Fetching exchange info for %s filters", symbol)
+        exchange_info = self._get_public("/fapi/v1/exchangeInfo")
+        symbol_info = next((s for s in exchange_info.get("symbols", []) if s["symbol"] == symbol), None)
+        if not symbol_info:
+            raise DexAPIError(f"Could not find symbol info for {symbol}")
+
+        filters = {f["filterType"]: f for f in symbol_info.get("filters", [])}
+        price_filter = filters.get("PRICE_FILTER")
+        lot_size_filter = filters.get("LOT_SIZE")
+        min_notional_filter = filters.get("MIN_NOTIONAL")
+
+        if not all([price_filter, lot_size_filter, min_notional_filter]):
+            raise DexAPIError(f"Missing required filters for {symbol}")
+
+        return {
+            "tick_size": Decimal(price_filter["tickSize"]),
+            "step_size": Decimal(lot_size_filter["stepSize"]),
+            "min_notional": Decimal(min_notional_filter["notional"]),
+        }
+
+    def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+        """Set leverage for a given symbol."""
+        logger.info("Setting leverage for %s to %sx", symbol, leverage)
+        return self._post_signed(
+            "/fapi/v1/leverage",
+            query=[("symbol", symbol), ("leverage", leverage)],
+            signature_location="query",
+        )
+
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: Union[float, Decimal],
+        price: Optional[Union[float, Decimal]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Place an order on Aster, separate from the test-specific one."""
+        if params is None:
+            params = {}
+
+        filters = self.get_symbol_filters(symbol)
+        step_size = filters['step_size']
+        tick_size = filters['tick_size']
+
+        order_payload: List[Tuple[str, Any]] = [
+            ("symbol", symbol),
+            ("side", side.upper()),
+            ("type", order_type.upper()),
+        ]
+
+        if "newClientOrderId" not in params:
+            order_payload.append(("newClientOrderId", f"dxp-{uuid.uuid4().hex}"))
+
+        qty_precision = -step_size.normalize().as_tuple().exponent
+        qty_str = f"{Decimal(str(quantity)):.{qty_precision}f}"
+        order_payload.append(("quantity", qty_str))
+
+        if order_type.upper() == "LIMIT":
+            if price is None:
+                raise ValueError("Price must be provided for LIMIT orders")
+
+            price_precision = -tick_size.normalize().as_tuple().exponent
+            price_str = f"{Decimal(str(price)):.{price_precision}f}"
+            order_payload.extend([
+                ("price", price_str),
+                ("timeInForce", params.get("timeInForce", "GTC")),
+            ])
+
+        for key, value in params.items():
+            if key not in ['timeInForce', 'newClientOrderId']:
+                order_payload.append((key, value))
+
+        logger.info("Placing order with payload: %s", dict(order_payload))
+        return self._post_signed("/fapi/v1/order", body=order_payload)
 
     def _get_public(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """Generic public GET request helper."""

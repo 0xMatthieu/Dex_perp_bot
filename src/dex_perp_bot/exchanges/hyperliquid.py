@@ -61,6 +61,54 @@ class HyperliquidClient:
             raise DexAPIError("Failed to fetch Hyperliquid predicted funding rates") from exc
         return rates
 
+    def get_price(self, symbol: str) -> Decimal:
+        """Fetch the current mid-price for a symbol."""
+        logger.debug("Fetching order book for %s to get current price", symbol)
+        try:
+            order_book = self._client.fetch_order_book(symbol)
+            if not order_book.get("bids") or not order_book.get("asks"):
+                raise DexAPIError(f"Order book for {symbol} is empty, cannot determine price")
+            best_bid = order_book["bids"][0][0]
+            best_ask = order_book["asks"][0][0]
+            return (Decimal(str(best_bid)) + Decimal(str(best_ask))) / 2
+        except Exception as exc:
+            raise DexAPIError(f"Failed to fetch price for {symbol}") from exc
+
+    def set_leverage(self, symbol: str, leverage: int) -> None:
+        """Set leverage for a given symbol."""
+        logger.info("Setting leverage for %s to %sx", symbol, leverage)
+        try:
+            self._client.set_leverage(leverage, symbol)
+        except Exception as exc:
+            raise DexAPIError(f"Failed to set leverage for {symbol}") from exc
+
+    def place_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        price: Optional[float] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Place an order on Hyperliquid."""
+        price_for_order = price
+        if order_type.upper() == "MARKET" and price is None:
+            # Market orders require a price for slippage calculation in the underlying client
+            price_for_order = float(self.get_price(symbol))
+
+        try:
+            return self._client.create_order(
+                symbol=symbol,
+                type=order_type.lower(),
+                side=side.lower(),
+                amount=quantity,
+                price=price_for_order,
+                params=params or {},
+            )
+        except Exception as exc:
+            raise DexAPIError("Failed to create Hyperliquid order") from exc
+
     def create_order(
         self,
         side: str,
