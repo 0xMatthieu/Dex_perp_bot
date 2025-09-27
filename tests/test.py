@@ -147,3 +147,38 @@ def run_order_tests(aster_client: AsterClient, hyperliquid_client: HyperliquidCl
     print("\n--- Order Test Results ---")
     print(json.dumps(summary, indent=2))
     return summary
+
+
+if __name__ == "__main__":
+    import sys
+    from pathlib import Path
+
+    # Add project root to path to allow importing from `src`
+    project_root = Path(__file__).resolve().parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+    from src.dex_perp_bot.config import Settings
+    from src.dex_perp_bot.exchanges.aster import AsterClient
+    from src.dex_perp_bot.exchanges.hyperliquid import HyperliquidClient
+    from src.dex_perp_bot.exchanges.base import DexAPIError
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    try:
+        settings = Settings.from_env()
+    except ValueError as exc:
+        logger.error("Configuration error: %s", exc)
+        sys.exit(1)
+
+    hyperliquid_client = HyperliquidClient(settings.hyperliquid)
+    aster_client = AsterClient(settings.aster, settings.aster_config)
+
+    try:
+        logger.info("Synchronizing time with Aster API...")
+        aster_client.sync_time()
+    except DexAPIError as exc:
+        logger.error("Failed to sync time with Aster: %s", exc)
+        # It's not critical for funding tests, but good to know.
+
+    run_funding_test(aster_client, hyperliquid_client)
