@@ -276,7 +276,7 @@ class AsterClient:
         order_payload: List[Tuple[str, Any]] = [
             ("symbol", symbol),
             ("side", close_side),
-            ("type", "MARKET"),
+            ("type", "STOP_MARKET"),
             ("closePosition", "true"),
         ]
 
