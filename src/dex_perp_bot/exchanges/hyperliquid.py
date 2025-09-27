@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List, Tuple
 
 from hyperliquid import HyperliquidSync
 
@@ -47,4 +47,12 @@ class HyperliquidClient:
             raise BalanceParsingError("Hyperliquid balance response missing USDC totals")
 
         return WalletBalance(total=total, available=available, raw=balance)
+
+    def get_predicted_funding_rates(self) -> List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]]:
+        """Retrieve predicted funding rates for different venues."""
+        try:
+            rates = self._client.info(type="predictedFundings")
+        except Exception as exc:  # pragma: no cover - defensive
+            raise DexAPIError("Failed to fetch Hyperliquid predicted funding rates") from exc
+        return rates
 

@@ -53,6 +53,14 @@ def main() -> int:
         logger.exception("Failed to query Aster funding rates")
         #summary["aster_funding"] = {"error": str(exc)}
 
+    try:
+        logger.info("Querying Hyperliquid predicted funding rates...")
+        predicted_rates = hyperliquid_client.get_predicted_funding_rates()
+        summary["hyperliquid_predicted_funding"] = predicted_rates
+    except DexClientError as exc:
+        logger.exception("Failed to query Hyperliquid predicted funding rates")
+        summary["hyperliquid_predicted_funding"] = {"error": str(exc)}
+
     print(json.dumps(summary, indent=2))
     return 0
 
