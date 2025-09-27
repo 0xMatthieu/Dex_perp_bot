@@ -269,6 +269,25 @@ class AsterClient:
 
         close_side = "SELL" if position_amt > 0 else "BUY"
 
+        # Fetch price info to set stopPrice
+        exchange_info = self._get_public("/fapi/v1/exchangeInfo")
+        symbol_info = next((s for s in exchange_info.get("symbols", []) if s["symbol"] == symbol), None)
+        if not symbol_info:
+            raise DexAPIError(f"Could not find symbol info for {symbol}")
+        filters = {f["filterType"]: f for f in symbol_info.get("filters", [])}
+        price_filter = filters.get("PRICE_FILTER")
+        if not price_filter:
+            raise DexAPIError(f"Missing PRICE_FILTER for {symbol}")
+        tick_size = Decimal(price_filter["tickSize"])
+
+        price_info = self._get_public("/fapi/v1/ticker/price", params={"symbol": symbol})
+        current_price = Decimal(price_info["price"])
+
+        # Round to tick_size
+        stop_price = round(current_price / tick_size) * tick_size
+        price_precision = -tick_size.normalize().as_tuple().exponent
+        stop_price_str = f"{stop_price:.{price_precision}f}"
+
         # 2. Place a closePosition market order to close the position.
         # NOTE: This uses closePosition=true, which the provided docs state is for
         # STOP_MARKET or TAKE_PROFIT_MARKET orders. We assume it also works for
@@ -277,6 +296,7 @@ class AsterClient:
             ("symbol", symbol),
             ("side", close_side),
             ("type", "STOP_MARKET"),
+            ("stopPrice", stop_price_str),
             ("closePosition", "true"),
         ]
 
