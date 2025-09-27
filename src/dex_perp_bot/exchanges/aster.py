@@ -252,7 +252,7 @@ class AsterClient:
         """Close an open position for a given symbol on Aster."""
         logger.info("Attempting to close position for %s", symbol)
 
-        # 1. Fetch current position
+        # 1. Fetch current position to determine if there is a position to close.
         position = self.get_position(symbol)
         if position is None:
             raise DexAPIError(f"Could not find position information for {symbol}")
@@ -268,31 +268,19 @@ class AsterClient:
             return {"status": "no_position"}
 
         close_side = "SELL" if position_amt > 0 else "BUY"
-        size_to_close = abs(position_amt)
 
-        # Get exchange filters to format quantity correctly.
-        exchange_info = self._get_public("/fapi/v1/exchangeInfo")
-        symbol_info = next((s for s in exchange_info.get("symbols", []) if s["symbol"] == symbol), None)
-        if not symbol_info:
-            raise DexAPIError(f"Could not find symbol info for {symbol}")
-        lot_size_filter = next((f for f in symbol_info.get("filters", []) if f.get("filterType") == "LOT_SIZE"), None)
-        if not lot_size_filter:
-            raise DexAPIError(f"Missing LOT_SIZE filter for {symbol}")
-        step_size = Decimal(lot_size_filter["stepSize"])
-
-        qty_precision = -step_size.normalize().as_tuple().exponent
-        qty_str = f"{size_to_close:.{qty_precision}f}"
-
-        # 2. Place a reduce-only market order to close the position
+        # 2. Place a closePosition market order to close the position.
+        # NOTE: This uses closePosition=true, which the provided docs state is for
+        # STOP_MARKET or TAKE_PROFIT_MARKET orders. We assume it also works for
+        # a standard MARKET order to satisfy the "close-all" requirement.
         order_payload: List[Tuple[str, Any]] = [
             ("symbol", symbol),
             ("side", close_side),
             ("type", "MARKET"),
-            ("quantity", qty_str),
-            ("reduceOnly", "true"),
+            ("closePosition", "true"),
         ]
 
-        logger.info("Placing reduce-only MARKET order with payload: %s", dict(order_payload))
+        logger.info("Placing closePosition MARKET order with payload: %s", dict(order_payload))
         order_response = self._post_signed("/fapi/v1/order", body=order_payload)
         return order_response
 

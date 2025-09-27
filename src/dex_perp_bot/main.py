@@ -73,22 +73,17 @@ def main() -> int:
         )
         summary["aster_order"] = order_response
 
-        # If order was created successfully, wait 10s then cancel it for this test.
-        if "clientOrderId" in order_response and isinstance(order_response.get("clientOrderId"), str):
-            client_order_id = order_response["clientOrderId"]
-            symbol = order_response.get("symbol", "BTCUSDT")  # Fallback to what we know we used
-            logger.info("Successfully created order with clientOrderId %s for %s, waiting 10s before cancelling.", client_order_id, symbol)
-            time.sleep(10)
-            logger.info("Now cancelling order %s.", client_order_id)
-            try:
-                cancel_response = aster_client.cancel_order(symbol=symbol, orig_client_order_id=client_order_id)
-                summary["aster_cancel_order"] = cancel_response
-                logger.info("Successfully cancelled order %s.", client_order_id)
-            except DexClientError as exc_cancel:
-                logger.exception("Failed to cancel order on Aster")
-                summary["aster_cancel_order"] = {"error": str(exc_cancel)}
-        else:
-            logger.warning("Order creation did not return a clientOrderId, skipping cancellation.")
+        # A market order should open a position. We'll wait and then attempt to close it.
+        symbol = order_response.get("symbol", "BTCUSDT")
+        logger.info("Market order sent for %s. Waiting 5s before attempting to close position.", symbol)
+        time.sleep(5)
+        try:
+            close_response = aster_client.close_position(symbol=symbol)
+            summary["aster_close_position"] = close_response
+            logger.info("Successfully sent request to close position for %s.", symbol)
+        except DexClientError as exc_close:
+            logger.exception("Failed to close position on Aster")
+            summary["aster_close_position"] = {"error": str(exc_close)}
 
     except (DexClientError, ValueError) as exc:
         logger.exception("Failed to create order on Aster")
@@ -105,31 +100,17 @@ def main() -> int:
         )
         summary["hyperliquid_order"] = hl_order_response
 
-        # If order was created successfully, wait 10s then cancel it for this test.
-        if "id" in hl_order_response and isinstance(hl_order_response.get("id"), str):
-            order_id = hl_order_response["id"]
-            symbol = hl_order_response.get("symbol")
-            if not symbol:
-                # ccxt's Hyperliquid order creation response might not include the symbol.
-                # We'll use the one we know we passed to create_order for cancellation.
-                symbol = "BTC/USDC:USDC"
-                logger.warning(
-                    "Hyperliquid order response missing 'symbol', using '%s' for cancellation.",
-                    symbol,
-                )
-
-            logger.info("Successfully created Hyperliquid order %s for %s, waiting 10s before cancelling.", order_id, symbol)
-            time.sleep(10)
-            logger.info("Now cancelling Hyperliquid order %s.", order_id)
-            try:
-                cancel_response = hyperliquid_client.cancel_order(symbol=symbol, order_id=order_id)
-                summary["hyperliquid_cancel_order"] = cancel_response
-                logger.info("Successfully cancelled Hyperliquid order %s.", order_id)
-            except DexClientError as exc_cancel:
-                logger.exception("Failed to cancel order on Hyperliquid")
-                summary["hyperliquid_cancel_order"] = {"error": str(exc_cancel)}
-        else:
-            logger.warning("Hyperliquid order creation did not return an id, skipping cancellation.")
+        # A market order should open a position. We'll wait and then attempt to close it.
+        symbol = "BTC/USDC:USDC"
+        logger.info("Market order sent for %s. Waiting 5s before attempting to close position.", symbol)
+        time.sleep(5)
+        try:
+            close_response = hyperliquid_client.close_position(symbol=symbol)
+            summary["hyperliquid_close_position"] = close_response
+            logger.info("Successfully sent request to close position for %s.", symbol)
+        except DexClientError as exc_close:
+            logger.exception("Failed to close position on Hyperliquid")
+            summary["hyperliquid_close_position"] = {"error": str(exc_close)}
 
     except (DexClientError, ValueError) as exc:
         logger.exception("Failed to create order on Hyperliquid")
