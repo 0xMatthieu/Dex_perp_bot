@@ -141,3 +141,57 @@ class HyperliquidClient:
         except Exception as exc:
             raise DexAPIError(f"Failed to cancel Hyperliquid order {order_id}") from exc
 
+    def close_position(self, symbol: str) -> Dict[str, Any]:
+        """Close an open position for a given symbol on Hyperliquid."""
+        logger.info("Attempting to close position for %s", symbol)
+
+        # 1. Fetch current position
+        try:
+            position = self._client.fetch_position(symbol)
+        except Exception as exc:
+            logger.info("Could not fetch position for %s, assuming none is open. Error: %s", symbol, exc)
+            return {"status": "no_position", "reason": str(exc)}
+
+        position_size = to_decimal(position.get("contracts"))
+        if not position_size or position_size.is_zero():
+            logger.info("No open position found for %s", symbol)
+            return {"status": "no_position"}
+
+        side = position.get("side")
+        if side not in ("long", "short"):
+            raise DexAPIError(f"Unknown position side '{side}' for {symbol}")
+
+        close_side = "sell" if side == "long" else "buy"
+        size_to_close = float(position_size)
+
+        # 2. Get current price for market order slippage calculation
+        logger.info("Fetching order book for %s to get price for closing order", symbol)
+        try:
+            order_book = self._client.fetch_order_book(symbol)
+            if not order_book.get("bids") or not order_book.get("asks"):
+                raise DexAPIError(f"Order book for {symbol} is empty, cannot determine price")
+            best_bid = order_book["bids"][0][0]
+            best_ask = order_book["asks"][0][0]
+            current_price = (Decimal(str(best_bid)) + Decimal(str(best_ask))) / 2
+        except Exception as exc:
+            raise DexAPIError(f"Failed to fetch price for {symbol}") from exc
+
+        # 3. Place a reduce-only market order to close the position
+        logger.info(
+            "Placing reduce-only MARKET %s order for %s of %s to close position",
+            close_side, size_to_close, symbol
+        )
+        try:
+            order_response = self._client.create_order(
+                symbol=symbol,
+                type="market",
+                side=close_side.lower(),
+                amount=size_to_close,
+                price=float(current_price),
+                params={"reduceOnly": True},
+            )
+        except Exception as exc:
+            raise DexAPIError(f"Failed to place closing order for {symbol}") from exc
+
+        return order_response
+

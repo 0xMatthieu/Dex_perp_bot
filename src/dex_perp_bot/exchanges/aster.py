@@ -7,7 +7,7 @@ import hmac
 import logging
 import time
 import urllib.parse
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import requests
@@ -230,6 +230,67 @@ class AsterClient:
 
         # 8. The function should print the final order payload and return the JSON response.
         print("Final order payload:", dict(order_payload))
+        return order_response
+
+    def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Fetch position information for a single symbol from the account endpoint."""
+        logger.debug("Fetching account info to find position for %s", symbol)
+        account_info = self._get_signed("/fapi/v4/account")
+        positions = account_info.get("positions")
+        if not isinstance(positions, list):
+            raise DexAPIError("Account response did not contain a 'positions' list")
+
+        for position in positions:
+            if isinstance(position, dict) and position.get("symbol") == symbol:
+                return position
+        return None
+
+    def close_position(self, symbol: str) -> Dict[str, Any]:
+        """Close an open position for a given symbol on Aster."""
+        logger.info("Attempting to close position for %s", symbol)
+
+        # 1. Fetch current position
+        position = self.get_position(symbol)
+        if position is None:
+            raise DexAPIError(f"Could not find position information for {symbol}")
+
+        position_amt_str = position.get("positionAmt", "0")
+        try:
+            position_amt = Decimal(position_amt_str)
+        except InvalidOperation:
+            raise DexAPIError(f"Invalid position amount '{position_amt_str}' for {symbol}")
+
+        if position_amt.is_zero():
+            logger.info("No open position found for %s", symbol)
+            return {"status": "no_position"}
+
+        close_side = "SELL" if position_amt > 0 else "BUY"
+        size_to_close = abs(position_amt)
+
+        # Get exchange filters to format quantity correctly.
+        exchange_info = self._get_public("/fapi/v1/exchangeInfo")
+        symbol_info = next((s for s in exchange_info.get("symbols", []) if s["symbol"] == symbol), None)
+        if not symbol_info:
+            raise DexAPIError(f"Could not find symbol info for {symbol}")
+        lot_size_filter = next((f for f in symbol_info.get("filters", []) if f.get("filterType") == "LOT_SIZE"), None)
+        if not lot_size_filter:
+            raise DexAPIError(f"Missing LOT_SIZE filter for {symbol}")
+        step_size = Decimal(lot_size_filter["stepSize"])
+
+        qty_precision = -step_size.normalize().as_tuple().exponent
+        qty_str = f"{size_to_close:.{qty_precision}f}"
+
+        # 2. Place a reduce-only market order to close the position
+        order_payload: List[Tuple[str, Any]] = [
+            ("symbol", symbol),
+            ("side", close_side),
+            ("type", "MARKET"),
+            ("quantity", qty_str),
+            ("reduceOnly", "true"),
+        ]
+
+        logger.info("Placing reduce-only MARKET order with payload: %s", dict(order_payload))
+        order_response = self._post_signed("/fapi/v1/order", body=order_payload)
         return order_response
 
     def cancel_order(
