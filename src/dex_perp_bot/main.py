@@ -129,7 +129,7 @@ def main() -> int:
         logger.exception("Failed to create order on Hyperliquid")
         summary["hyperliquid_order"] = {"error": str(exc)}
 
-    print(json.dumps(summary, indent=2))
+    #print(json.dumps(summary, indent=2))
     return 0
 
 
