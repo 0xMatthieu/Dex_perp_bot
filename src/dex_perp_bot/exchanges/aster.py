@@ -320,8 +320,15 @@ class AsterClient:
         price_info = self._get_public("/fapi/v1/ticker/price", params={"symbol": symbol})
         current_price = Decimal(price_info["price"])
 
+        # To trigger the stop order immediately, set the stopPrice slightly
+        # through the current market price.
+        if close_side == "SELL":  # Closing a long position
+            stop_price = current_price * Decimal("0.999")  # 0.1% below
+        else:  # Closing a short position
+            stop_price = current_price * Decimal("1.001")  # 0.1% above
+
         # Round to tick_size
-        stop_price = round(current_price / tick_size) * tick_size
+        stop_price = round(stop_price / tick_size) * tick_size
         price_precision = -tick_size.normalize().as_tuple().exponent
         stop_price_str = f"{stop_price:.{price_precision}f}"
 
@@ -334,7 +341,7 @@ class AsterClient:
             ("side", close_side),
             ("type", "STOP_MARKET"),
             ("stopPrice", stop_price_str),
-            ("closePosition", "TRUE"),
+            ("closePosition", "true"),
             ("priceProtect", "FALSE"),
         ]
 
