@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+from decimal import Decimal
 from typing import Any, Callable, Dict, List, Tuple
 
 from hyperliquid import HyperliquidSync
@@ -11,6 +13,8 @@ from ..config import HyperliquidCredentials
 
 
 ClientFactory = Callable[[Dict[str, Any]], Any]
+
+logger = logging.getLogger(__name__)
 
 
 class HyperliquidClient:
@@ -56,4 +60,77 @@ class HyperliquidClient:
         except Exception as exc:  # pragma: no cover - defensive
             raise DexAPIError("Failed to fetch Hyperliquid predicted funding rates") from exc
         return rates
+
+    def create_order(
+        self,
+        side: str,
+        order_type: str,
+        leverage: int,
+        margin_usd: float,
+    ) -> Dict[str, Any]:
+        """Create an order on Hyperliquid for BTC."""
+        symbol = "BTC/USDC:USDC"
+
+        # 1. Get current price
+        logger.info("Fetching order book for %s to get current price", symbol)
+        try:
+            order_book = self._client.fetch_order_book(symbol)
+            if not order_book.get("bids") or not order_book.get("asks"):
+                raise DexAPIError(f"Order book for {symbol} is empty, cannot determine price")
+            best_bid = order_book["bids"][0][0]
+            best_ask = order_book["asks"][0][0]
+            current_price = (Decimal(str(best_bid)) + Decimal(str(best_ask))) / 2
+        except Exception as exc:
+            raise DexAPIError(f"Failed to fetch price for {symbol}") from exc
+
+        logger.info("Current mid-price for %s is %s", symbol, current_price)
+
+        # 2. Compute order quantity
+        qty = (Decimal(str(margin_usd)) * Decimal(leverage)) / current_price
+        qty_float = float(qty)
+
+        # 3. Set leverage
+        logger.info("Setting leverage for %s to %sx", symbol, leverage)
+        try:
+            self._client.set_leverage(leverage, symbol)
+        except Exception as exc:
+            raise DexAPIError(f"Failed to set leverage for {symbol}") from exc
+
+        # 4. Place order
+        logger.info("Placing %s %s order for %s of %s", order_type, side, qty_float, symbol)
+        # For market orders, ccxt hyperliquid implementation needs a price for slippage calculation.
+        price_for_order = float(current_price)
+        if order_type.upper() == "LIMIT":
+            logger.info("Using price %s for LIMIT order", price_for_order)
+        elif order_type.upper() == "MARKET":
+            logger.info("Using price %s for MARKET order slippage calculation", price_for_order)
+
+        try:
+            order_response = self._client.create_order(
+                symbol=symbol,
+                type=order_type.lower(),
+                side=side.lower(),
+                amount=qty_float,
+                price=price_for_order,
+            )
+        except Exception as exc:
+            raise DexAPIError("Failed to create Hyperliquid order") from exc
+
+        print("Final order payload sent to Hyperliquid via ccxt:", {
+            "symbol": symbol, "type": order_type.lower(), "side": side.lower(),
+            "amount": qty_float, "price": price_for_order,
+        })
+        return order_response
+
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: str,
+    ) -> Dict[str, Any]:
+        """Cancel an active order on Hyperliquid."""
+        logger.info("Canceling order %s for %s", order_id, symbol)
+        try:
+            return self._client.cancel_order(id=order_id, symbol=symbol)
+        except Exception as exc:
+            raise DexAPIError(f"Failed to cancel Hyperliquid order {order_id}") from exc
 

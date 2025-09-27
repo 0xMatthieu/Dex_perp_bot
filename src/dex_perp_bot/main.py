@@ -94,6 +94,41 @@ def main() -> int:
         logger.exception("Failed to create order on Aster")
         summary["aster_order"] = {"error": str(exc)}
 
+    try:
+        logger.info("Creating a test order on Hyperliquid...")
+        # Example: 10x leverage on 20 USD margin for a LIMIT BUY order.
+        hl_order_response = hyperliquid_client.create_order(
+            side="BUY",
+            order_type="LIMIT",
+            leverage=10,
+            margin_usd=20.0,
+        )
+        summary["hyperliquid_order"] = hl_order_response
+
+        # If order was created successfully, wait 10s then cancel it for this test.
+        if "id" in hl_order_response and isinstance(hl_order_response.get("id"), str):
+            order_id = hl_order_response["id"]
+            symbol = hl_order_response.get("symbol")
+            if not symbol:
+                raise ValueError("Hyperliquid order response did not contain a symbol")
+
+            logger.info("Successfully created Hyperliquid order %s for %s, waiting 10s before cancelling.", order_id, symbol)
+            time.sleep(10)
+            logger.info("Now cancelling Hyperliquid order %s.", order_id)
+            try:
+                cancel_response = hyperliquid_client.cancel_order(symbol=symbol, order_id=order_id)
+                summary["hyperliquid_cancel_order"] = cancel_response
+                logger.info("Successfully cancelled Hyperliquid order %s.", order_id)
+            except DexClientError as exc_cancel:
+                logger.exception("Failed to cancel order on Hyperliquid")
+                summary["hyperliquid_cancel_order"] = {"error": str(exc_cancel)}
+        else:
+            logger.warning("Hyperliquid order creation did not return an id, skipping cancellation.")
+
+    except (DexClientError, ValueError) as exc:
+        logger.exception("Failed to create order on Hyperliquid")
+        summary["hyperliquid_order"] = {"error": str(exc)}
+
     print(json.dumps(summary, indent=2))
     return 0
 
