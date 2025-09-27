@@ -89,6 +89,34 @@ class AsterClient:
 
         return WalletBalance(total=total, available=available, raw=response)
 
+    def get_funding_rate(
+        self,
+        symbol: Optional[str] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch funding rate history from GET /fapi/v1/fundingRate."""
+        endpoint = "/fapi/v1/fundingRate"
+        url = f"{self._config.base_url.rstrip('/')}{endpoint}"
+
+        params: Dict[str, Any] = {}
+        if symbol is not None:
+            params["symbol"] = symbol
+        if start_time is not None:
+            params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
+        if limit is not None:
+            params["limit"] = limit
+
+        try:
+            response = self._session.get(url, params=params, timeout=self._config.request_timeout)
+            self._raise_for_json(response)
+            return response.json()
+        except requests.RequestException as exc:  # pragma: no cover - network failure
+            raise DexAPIError(f"Aster funding rate request to {endpoint} failed") from exc
+
     # -------- GET SIGNED (query only) --------
     def _get_signed(self, endpoint: str, params: Optional[KeyVals] = None) -> Mapping[str, Any]:
         base_items: List[Tuple[str, Any]] = []
