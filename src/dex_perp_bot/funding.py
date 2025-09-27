@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from .exchanges.aster import AsterClient
 from .exchanges.hyperliquid import HyperliquidClient
@@ -14,6 +15,7 @@ class FundingRate:
     symbol: str
     rate: Decimal
     apy: Decimal
+    next_funding_time_ms: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -23,11 +25,14 @@ class FundingComparison:
     long_venue: str
     short_venue: str
     apy_difference: Decimal
+    funding_is_imminent: bool
+    next_funding_time_ms: Optional[int]
 
     def __str__(self) -> str:
+        imminent_str = " (IMMINENT)" if self.funding_is_imminent else ""
         return (
             f"Long {self.symbol} on {self.long_venue}, Short on {self.short_venue}: "
-            f"APY Difference = {self.apy_difference:.4f}%"
+            f"APY Difference = {self.apy_difference:.4f}%{imminent_str}"
         )
 
 
@@ -48,9 +53,12 @@ def _parse_aster_funding_rates(raw_rates: List[Dict]) -> Dict[str, FundingRate]:
         # Normalize symbol from BTCUSDT -> BTC
         normalized_symbol = symbol.replace("USDT", "").replace("USD", "")
         rate = Decimal(rate_str)
+        funding_time_ms = item.get("fundingTime")
         # Aster funding is typically every 8 hours (3 times a day)
         apy = _calculate_apy(rate, periods_per_day=3)
-        parsed[normalized_symbol] = FundingRate(symbol=normalized_symbol, rate=rate, apy=apy)
+        parsed[normalized_symbol] = FundingRate(
+            symbol=normalized_symbol, rate=rate, apy=apy, next_funding_time_ms=funding_time_ms
+        )
     return parsed
 
 
@@ -74,19 +82,23 @@ def _parse_hyperliquid_funding_rates(raw_rates: List) -> Dict[str, FundingRate]:
             continue
 
         rate_str = hl_rate_info.get("fundingRate")
+        funding_time_ms = hl_rate_info.get("nextFundingTime")
         if not rate_str:
             continue
 
         rate = Decimal(rate_str)
         # Hyperliquid funding is hourly (24 times a day)
         apy = _calculate_apy(rate, periods_per_day=24)
-        parsed[symbol] = FundingRate(symbol=symbol, rate=rate, apy=apy)
+        parsed[symbol] = FundingRate(
+            symbol=symbol, rate=rate, apy=apy, next_funding_time_ms=funding_time_ms
+        )
     return parsed
 
 
 def fetch_and_compare_funding_rates(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
+    imminent_funding_minutes: int = 5,
 ) -> List[FundingComparison]:
     """
     Fetches funding rates from Aster and Hyperliquid, compares them,
@@ -102,25 +114,46 @@ def fetch_and_compare_funding_rates(
 
     common_symbols = sorted(list(set(aster_rates.keys()) & set(hyperliquid_rates.keys())))
 
+    current_time_ms = int(time.time() * 1000)
+    minutes_to_ms = imminent_funding_minutes * 60 * 1000
+
     comparisons: List[FundingComparison] = []
     for symbol in common_symbols:
         aster_rate = aster_rates[symbol]
         hyperliquid_rate = hyperliquid_rates[symbol]
 
         # Scenario 1: Long Aster, Short Hyperliquid
+        funding_is_imminent_s1 = False
+        next_funding_time_s1 = aster_rate.next_funding_time_ms
+        if next_funding_time_s1:
+            time_diff_ms = next_funding_time_s1 - current_time_ms
+            if 0 < time_diff_ms <= minutes_to_ms:
+                funding_is_imminent_s1 = True
+
         comparisons.append(FundingComparison(
             symbol=symbol,
             long_venue="Aster",
             short_venue="Hyperliquid",
             apy_difference=aster_rate.apy - hyperliquid_rate.apy,
+            funding_is_imminent=funding_is_imminent_s1,
+            next_funding_time_ms=next_funding_time_s1,
         ))
 
         # Scenario 2: Long Hyperliquid, Short Aster
+        funding_is_imminent_s2 = False
+        next_funding_time_s2 = hyperliquid_rate.next_funding_time_ms
+        if next_funding_time_s2:
+            time_diff_ms = next_funding_time_s2 - current_time_ms
+            if 0 < time_diff_ms <= minutes_to_ms:
+                funding_is_imminent_s2 = True
+
         comparisons.append(FundingComparison(
             symbol=symbol,
             long_venue="Hyperliquid",
             short_venue="Aster",
             apy_difference=hyperliquid_rate.apy - aster_rate.apy,
+            funding_is_imminent=funding_is_imminent_s2,
+            next_funding_time_ms=next_funding_time_s2,
         ))
 
     # Sort by the highest APY difference

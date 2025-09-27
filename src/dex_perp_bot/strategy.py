@@ -42,7 +42,16 @@ def determine_strategy(
         logger.info("No common symbols with funding rates found.")
         return None
 
-    best_opp = opportunities[0]
+    # Filter for imminent opportunities with a positive APY difference
+    imminent_opportunities = [
+        opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > 0
+    ]
+
+    if not imminent_opportunities:
+        logger.info("No imminent funding opportunities with positive APY difference found.")
+        return None
+
+    best_opp = imminent_opportunities[0]  # Already sorted by apy_difference
     if best_opp.apy_difference < min_apy_diff_pct:
         logger.info(
             f"Best opportunity APY diff {best_opp.apy_difference:.4f}% is below threshold {min_apy_diff_pct:.4f}%. No action."
