@@ -53,7 +53,8 @@ def _parse_aster_funding_rates(raw_rates: List[Dict]) -> Dict[str, FundingRate]:
         # Normalize symbol from BTCUSDT -> BTC
         normalized_symbol = symbol.replace("USDT", "").replace("USD", "")
         rate = Decimal(rate_str)
-        funding_time_ms = item.get("fundingTime")
+        funding_time_ms_raw = item.get("fundingTime")
+        funding_time_ms = int(funding_time_ms_raw) if funding_time_ms_raw is not None else None
         # Aster funding is typically every 8 hours (3 times a day)
         apy = _calculate_apy(rate, periods_per_day=3)
         parsed[normalized_symbol] = FundingRate(
@@ -82,7 +83,8 @@ def _parse_hyperliquid_funding_rates(raw_rates: List) -> Dict[str, FundingRate]:
             continue
 
         rate_str = hl_rate_info.get("fundingRate")
-        funding_time_ms = hl_rate_info.get("nextFundingTime")
+        funding_time_ms_raw = hl_rate_info.get("nextFundingTime")
+        funding_time_ms = int(funding_time_ms_raw) if funding_time_ms_raw is not None else None
         if not rate_str:
             continue
 
