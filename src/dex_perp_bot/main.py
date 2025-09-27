@@ -11,6 +11,7 @@ from .config import Settings
 from .exchanges.aster import AsterClient
 from .exchanges.base import DexClientError, DexAPIError
 from .exchanges.hyperliquid import HyperliquidClient
+from .funding import fetch_and_compare_funding_rates
 
 logger = logging.getLogger(__name__)
 
@@ -47,20 +48,11 @@ def main() -> int:
         #    summary[venue] = balance.as_dict()
 
     try:
-        logger.info("Querying Aster funding rate for all symbol...")
-        funding_rates = aster_client.get_funding_rate(symbol=None, limit=None)
-        summary["aster_funding"] = funding_rates
+        top_funding_pairs = fetch_and_compare_funding_rates(aster_client, hyperliquid_client)
+        summary["top_funding_opportunities"] = [str(p) for p in top_funding_pairs]
     except DexClientError as exc:
-        logger.exception("Failed to query Aster funding rates")
-        #summary["aster_funding"] = {"error": str(exc)}
-
-    try:
-        logger.info("Querying Hyperliquid predicted funding rates...")
-        predicted_rates = hyperliquid_client.get_predicted_funding_rates()
-        summary["hyperliquid_predicted_funding"] = predicted_rates
-    except DexClientError as exc:
-        logger.exception("Failed to query Hyperliquid predicted funding rates")
-        summary["hyperliquid_predicted_funding"] = {"error": str(exc)}
+        logger.exception("Failed to fetch or compare funding rates")
+        summary["top_funding_opportunities"] = {"error": str(exc)}
 
     # --- Aster Tests ---
     # Test 1: Market order -> should be filled -> logic should close the position.
