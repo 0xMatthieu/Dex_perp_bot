@@ -7,6 +7,7 @@ import hmac
 import logging
 import time
 import urllib.parse
+from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import requests
@@ -118,6 +119,112 @@ class AsterClient:
             return response.json()
         except requests.RequestException as exc:  # pragma: no cover - network failure
             raise DexAPIError(f"Aster funding rate request to {endpoint} failed") from exc
+
+    def _get_public(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        """Generic public GET request helper."""
+        url = f"{self._config.base_url.rstrip('/')}{endpoint}"
+        try:
+            response = self._session.get(url, params=params, timeout=self._config.request_timeout)
+            self._raise_for_json(response)
+            return response.json()
+        except requests.RequestException as exc:  # pragma: no cover - network failure
+            raise DexAPIError(f"Aster public request to {endpoint} failed") from exc
+
+    def create_order(
+        self,
+        side: str,
+        order_type: str,
+        leverage: int,
+        margin_usd: float,
+    ) -> Dict[str, Any]:
+        """Create an order on Aster for BTCUSDT."""
+        symbol = "BTCUSDT"
+
+        # 1. Query exchangeInfo for filters
+        logger.info("Fetching exchange info for %s", symbol)
+        exchange_info = self._get_public("/fapi/v1/exchangeInfo")
+        symbol_info = next((s for s in exchange_info.get("symbols", []) if s["symbol"] == symbol), None)
+        if not symbol_info:
+            raise DexAPIError(f"Could not find symbol info for {symbol}")
+
+        filters = {f["filterType"]: f for f in symbol_info.get("filters", [])}
+        price_filter = filters.get("PRICE_FILTER")
+        lot_size_filter = filters.get("LOT_SIZE")
+        min_notional_filter = filters.get("MIN_NOTIONAL")
+
+        if not all([price_filter, lot_size_filter, min_notional_filter]):
+            raise DexAPIError(f"Missing required filters for {symbol}")
+
+        tick_size = Decimal(price_filter["tickSize"])
+        step_size = Decimal(lot_size_filter["stepSize"])
+        min_notional = Decimal(min_notional_filter["minNotional"])
+
+        # 2. Query for current price
+        logger.info("Fetching ticker price for %s", symbol)
+        price_info = self._get_public("/fapi/v1/ticker/price", params={"symbol": symbol})
+        current_price = Decimal(price_info["price"])
+
+        # 3. Query for available balance (withdrawable)
+        logger.info("Fetching account balance to log available funds")
+        account_info_response = self._get_signed(self._config.balance_endpoint, params=[])
+        account_data = self._extract_account_data(account_info_response)
+        available_balance = to_decimal(find_first_key(account_data, self._config.available_fields))
+        logger.info("Available balance: %s", available_balance)
+
+        # 4. Compute order quantity
+        qty = (Decimal(str(margin_usd)) * Decimal(leverage)) / current_price
+        # Round down to stepSize
+        qty = (qty // step_size) * step_size
+
+        if qty == 0:
+            raise ValueError(
+                f"Calculated quantity is zero for margin {margin_usd}, leverage {leverage}. "
+                f"This may be due to low margin or high price. stepSize is {step_size}"
+            )
+
+        # Use current_price for notional check, even for LIMIT orders, as it's a pre-check.
+        notional_value = qty * current_price
+        if notional_value < min_notional:
+            raise ValueError(
+                f"Notional value {notional_value} is less than minNotional {min_notional}. "
+                f"Increase margin or leverage."
+            )
+
+        # 5. Set leverage
+        logger.info("Setting leverage for %s to %sx", symbol, leverage)
+        self._post_signed(
+            "/fapi/v1/leverage",
+            query=[("symbol", symbol), ("leverage", leverage)],
+            signature_location="query",
+        )
+
+        # 6. Place order
+        order_payload: List[Tuple[str, Any]] = [
+            ("symbol", symbol),
+            ("side", side.upper()),
+            ("type", order_type.upper()),
+        ]
+
+        # Format quantity according to stepSize precision
+        qty_precision = -step_size.normalize().as_tuple().exponent
+        qty_str = f"{qty:.{qty_precision}f}"
+        order_payload.append(("quantity", qty_str))
+
+        if order_type.upper() == "LIMIT":
+            rounded_price = round(current_price / tick_size) * tick_size
+            price_precision = -tick_size.normalize().as_tuple().exponent
+            price_str = f"{rounded_price:.{price_precision}f}"
+            order_payload.extend([
+                ("price", price_str),
+                ("timeInForce", "GTC"),
+            ])
+
+        logger.info("Placing order with payload: %s", dict(order_payload))
+        order_response = self._post_signed("/fapi/v1/order", body=order_payload)
+
+        # 8. The function should print the final order payload and return the JSON response.
+        print("Final order payload:", dict(order_payload))
+        return order_response
 
     # -------- GET SIGNED (query only) --------
     def _get_signed(self, endpoint: str, params: Optional[KeyVals] = None) -> Mapping[str, Any]:

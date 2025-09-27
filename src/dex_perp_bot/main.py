@@ -61,6 +61,20 @@ def main() -> int:
         logger.exception("Failed to query Hyperliquid predicted funding rates")
         summary["hyperliquid_predicted_funding"] = {"error": str(exc)}
 
+    try:
+        logger.info("Creating a test order on Aster...")
+        # Example: 10x leverage on 20 USD margin for a LIMIT BUY order.
+        order_response = aster_client.create_order(
+            side="BUY",
+            order_type="LIMIT",
+            leverage=10,
+            margin_usd=20.0,
+        )
+        summary["aster_order"] = order_response
+    except (DexClientError, ValueError) as exc:
+        logger.exception("Failed to create order on Aster")
+        summary["aster_order"] = {"error": str(exc)}
+
     print(json.dumps(summary, indent=2))
     return 0
 
