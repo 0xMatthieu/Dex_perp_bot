@@ -1,24 +1,27 @@
-"""Command-line entry point for querying exchange balances."""
+"""Command-line entry point for the bot."""
 
 from __future__ import annotations
 
-import json
 import logging
-import time
-from typing import Any, Dict
+import sys
+from pathlib import Path
 
-from .config import Settings
-from .exchanges.aster import AsterClient
-from .exchanges.base import DexClientError, DexAPIError
-from .exchanges.hyperliquid import HyperliquidClient
-from .funding import fetch_and_compare_funding_rates
+# Add project root to path to allow importing from `tests`
+project_root = Path(__file__).resolve().parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
+from src.dex_perp_bot.config import Settings
+from src.dex_perp_bot.exchanges.aster import AsterClient
+from src.dex_perp_bot.exchanges.base import DexAPIError
+from src.dex_perp_bot.exchanges.hyperliquid import HyperliquidClient
+from tests.test import run_funding_test
 
 logger = logging.getLogger(__name__)
 
 
 def main() -> int:
-    """Load configuration, query balances, and print a summary."""
-
+    """Load configuration, initialize clients, and run tests."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     try:
@@ -34,27 +37,12 @@ def main() -> int:
         logger.info("Synchronizing time with Aster API...")
         aster_client.sync_time()
     except DexAPIError as exc:
-        logger.error("Failed to sync time with Aster, balance query will likely fail: %s", exc)
+        logger.error("Failed to sync time with Aster: %s", exc)
+        # It's not critical for funding tests, but good to know.
 
-    summary: Dict[str, Any] = {}
+    # As requested, run only the funding test from the main entry point.
+    run_funding_test(aster_client, hyperliquid_client)
 
-    for venue, client in ("hyperliquid", hyperliquid_client), ("aster", aster_client):
-        try:
-            balance = client.get_wallet_balance()
-        except DexClientError as exc:
-            logger.exception("Failed to query %s balance", venue)
-            summary[venue] = {"error": str(exc)}
-        #else:
-        #    summary[venue] = balance.as_dict()
-
-    try:
-        top_funding_pairs = fetch_and_compare_funding_rates(aster_client, hyperliquid_client)
-        summary["top_funding_opportunities"] = [str(p) for p in top_funding_pairs]
-    except DexClientError as exc:
-        logger.exception("Failed to fetch or compare funding rates")
-        summary["top_funding_opportunities"] = {"error": str(exc)}
-
-    print(json.dumps(summary, indent=2))
     return 0
 
 
