@@ -157,7 +157,7 @@ class AsterClient:
 
         tick_size = Decimal(price_filter["tickSize"])
         step_size = Decimal(lot_size_filter["stepSize"])
-        min_notional = Decimal(min_notional_filter["minNotional"])
+        min_notional = Decimal(min_notional_filter["notional"])
 
         # 2. Query for current price
         logger.info("Fetching ticker price for %s", symbol)
