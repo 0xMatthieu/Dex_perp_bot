@@ -7,6 +7,7 @@ import hmac
 import logging
 import time
 import urllib.parse
+import uuid
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -199,10 +200,12 @@ class AsterClient:
         )
 
         # 6. Place order
+        client_order_id = f"dxp-{uuid.uuid4().hex}"
         order_payload: List[Tuple[str, Any]] = [
             ("symbol", symbol),
             ("side", side.upper()),
             ("type", order_type.upper()),
+            ("newClientOrderId", client_order_id),
         ]
 
         # Format quantity according to stepSize precision

@@ -74,21 +74,21 @@ def main() -> int:
         summary["aster_order"] = order_response
 
         # If order was created successfully, wait 10s then cancel it for this test.
-        if "orderId" in order_response and isinstance(order_response.get("orderId"), int):
-            order_id = order_response["orderId"]
+        if "clientOrderId" in order_response and isinstance(order_response.get("clientOrderId"), str):
+            client_order_id = order_response["clientOrderId"]
             symbol = order_response.get("symbol", "BTCUSDT")  # Fallback to what we know we used
-            logger.info("Successfully created order %s for %s, waiting 10s before cancelling.", order_id, symbol)
+            logger.info("Successfully created order with clientOrderId %s for %s, waiting 10s before cancelling.", client_order_id, symbol)
             time.sleep(10)
-            logger.info("Now cancelling order %s.", order_id)
+            logger.info("Now cancelling order %s.", client_order_id)
             try:
-                cancel_response = aster_client.cancel_order(symbol=symbol, order_id=order_id)
+                cancel_response = aster_client.cancel_order(symbol=symbol, orig_client_order_id=client_order_id)
                 summary["aster_cancel_order"] = cancel_response
-                logger.info("Successfully cancelled order %s.", order_id)
+                logger.info("Successfully cancelled order %s.", client_order_id)
             except DexClientError as exc_cancel:
                 logger.exception("Failed to cancel order on Aster")
                 summary["aster_cancel_order"] = {"error": str(exc_cancel)}
         else:
-            logger.warning("Order creation did not return an orderId, skipping cancellation.")
+            logger.warning("Order creation did not return a clientOrderId, skipping cancellation.")
 
     except (DexClientError, ValueError) as exc:
         logger.exception("Failed to create order on Aster")
