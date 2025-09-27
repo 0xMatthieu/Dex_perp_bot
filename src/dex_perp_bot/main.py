@@ -67,7 +67,7 @@ def main() -> int:
         # Example: 10x leverage on 20 USD margin for a LIMIT BUY order.
         order_response = aster_client.create_order(
             side="BUY",
-            order_type="LIMIT",
+            order_type="MARKET",
             leverage=10,
             margin_usd=20.0,
         )
@@ -99,7 +99,7 @@ def main() -> int:
         # Example: 10x leverage on 20 USD margin for a LIMIT BUY order.
         hl_order_response = hyperliquid_client.create_order(
             side="BUY",
-            order_type="LIMIT",
+            order_type="MARKET",
             leverage=10,
             margin_usd=20.0,
         )
