@@ -101,6 +101,13 @@ class HyperliquidClient:
         # For market orders, ccxt hyperliquid implementation needs a price for slippage calculation.
         price_for_order = float(current_price)
         if order_type.upper() == "LIMIT":
+            # For testing cancellation, place the order far from the current price
+            # to ensure it is not filled immediately.
+            if side.upper() == "BUY":
+                limit_price = current_price * Decimal("0.8")
+            else:
+                limit_price = current_price * Decimal("1.2")
+            price_for_order = float(limit_price)
             logger.info("Using price %s for LIMIT order", price_for_order)
         elif order_type.upper() == "MARKET":
             logger.info("Using price %s for MARKET order slippage calculation", price_for_order)
