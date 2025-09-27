@@ -44,35 +44,31 @@ def main() -> int:
         logger.error("Failed to sync time with Aster: %s", exc)
 
     try:
-        try:
-            # Determine capital from the smaller of the two available balances
-            balance_hl = hyperliquid_client.get_wallet_balance().available or Decimal("0")
-            balance_aster = aster_client.get_wallet_balance().available or Decimal("0")
-            capital_to_deploy = min(balance_hl, balance_aster)
+        # Determine capital from the smaller of the two available balances
+        balance_hl = hyperliquid_client.get_wallet_balance().available or Decimal("0")
+        balance_aster = aster_client.get_wallet_balance().available or Decimal("0")
+        capital_to_deploy = min(balance_hl, balance_aster)
 
-            if capital_to_deploy <= Decimal("10"):  # Minimum trade size check
-                logger.warning(
-                    f"Insufficient capital to deploy strategy. "
-                    f"Min available balance is ${capital_to_deploy:.2f}. Needs > $10."
-                )
-                return 0
-
-            # Find and execute the strategy
-            decision = determine_strategy(
-                aster_client, hyperliquid_client, leverage=4, capital_usd=capital_to_deploy
+        if capital_to_deploy <= Decimal("10"):  # Minimum trade size check
+            logger.warning(
+                f"Insufficient capital to deploy strategy. "
+                f"Min available balance is ${capital_to_deploy:.2f}. Needs > $10."
             )
+            return 0
 
-            if decision:
-                execute_strategy(aster_client, hyperliquid_client, decision)
-            else:
-                logger.info("No viable strategy decision was made.")
+        # Find and execute the strategy
+        decision = determine_strategy(
+            aster_client, hyperliquid_client, leverage=4, capital_usd=capital_to_deploy
+        )
 
-        except DexClientError as exc:
-            logger.exception("An error occurred during the strategy execution: %s", exc)
-            return 1
-    finally:
-        logger.info("Running cleanup process to close all positions and orders.")
-        cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client)
+        if decision:
+            execute_strategy(aster_client, hyperliquid_client, decision)
+        else:
+            logger.info("No viable strategy decision was made.")
+
+    except DexClientError as exc:
+        logger.exception("An error occurred during the strategy execution: %s", exc)
+        return 1
 
     return 0
 

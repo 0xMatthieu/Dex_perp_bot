@@ -65,6 +65,21 @@ def determine_strategy(
     symbol_hl = f"{symbol_base}/USDC:USDC"
     symbol_aster = f"{symbol_base}USDT"
 
+    # Check for existing positions to decide whether to open a new trade
+    logger.info(f"Checking for existing positions for {symbol_base}...")
+    hl_positions = hyperliquid_client.get_all_positions()
+    aster_positions = aster_client.get_all_positions()
+
+    hl_position_exists = any(p.get("symbol") == symbol_hl for p in hl_positions)
+    aster_position_exists = any(p.get("symbol") == symbol_aster for p in aster_positions)
+
+    if hl_position_exists or aster_position_exists:
+        logger.info(
+            f"Existing position found for {symbol_base} on at least one venue. "
+            "Holding position to farm airdrop points. No new positions will be opened."
+        )
+        return None
+
     long_venue_client = aster_client if best_opp.long_venue == "Aster" else hyperliquid_client
     short_venue_client = hyperliquid_client if best_opp.long_venue == "Aster" else aster_client
     
