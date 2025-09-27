@@ -44,8 +44,8 @@ def main() -> int:
         except DexClientError as exc:
             logger.exception("Failed to query %s balance", venue)
             summary[venue] = {"error": str(exc)}
-        else:
-            summary[venue] = balance.as_dict()
+        #else:
+        #    summary[venue] = balance.as_dict()
 
     try:
         top_funding_pairs = fetch_and_compare_funding_rates(aster_client, hyperliquid_client)
