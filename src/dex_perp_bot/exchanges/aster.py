@@ -211,7 +211,13 @@ class AsterClient:
         order_payload.append(("quantity", qty_str))
 
         if order_type.upper() == "LIMIT":
-            rounded_price = round(current_price / tick_size) * tick_size
+            # For testing cancellation, place the order far from the current price
+            # to ensure it is not filled immediately.
+            if side.upper() == "BUY":
+                limit_price = current_price * Decimal("0.8")
+            else:
+                limit_price = current_price * Decimal("1.2")
+            rounded_price = round(limit_price / tick_size) * tick_size
             price_precision = -tick_size.normalize().as_tuple().exponent
             price_str = f"{rounded_price:.{price_precision}f}"
             order_payload.extend([

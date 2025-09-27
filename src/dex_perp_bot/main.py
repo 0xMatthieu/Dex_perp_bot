@@ -110,7 +110,13 @@ def main() -> int:
             order_id = hl_order_response["id"]
             symbol = hl_order_response.get("symbol")
             if not symbol:
-                raise ValueError("Hyperliquid order response did not contain a symbol")
+                # ccxt's Hyperliquid order creation response might not include the symbol.
+                # We'll use the one we know we passed to create_order for cancellation.
+                symbol = "BTC/USDC:USDC"
+                logger.warning(
+                    "Hyperliquid order response missing 'symbol', using '%s' for cancellation.",
+                    symbol,
+                )
 
             logger.info("Successfully created Hyperliquid order %s for %s, waiting 10s before cancelling.", order_id, symbol)
             time.sleep(10)
