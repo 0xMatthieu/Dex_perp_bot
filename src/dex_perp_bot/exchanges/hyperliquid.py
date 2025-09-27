@@ -23,7 +23,7 @@ class HyperliquidClient:
         client_factory: ClientFactory | None = None,
     ) -> None:
         self._credentials = credentials
-        factory = client_factory or HyperliquidSync
+        factory = HyperliquidSync
         self._client = factory(
             {
                 "privateKey": credentials.private_key,

@@ -42,16 +42,16 @@ def main() -> int:
         except DexClientError as exc:
             logger.exception("Failed to query %s balance", venue)
             summary[venue] = {"error": str(exc)}
-        #else:
-        #    summary[venue] = balance.as_dict()
+        else:
+            summary[venue] = balance.as_dict()
 
     try:
         logger.info("Querying Aster funding rate for ETH-PERP...")
-        funding_rates = aster_client.get_funding_rate(symbol="ETH-PERP", limit=5)
+        funding_rates = aster_client.get_funding_rate(symbol=None, limit=None)
         summary["aster_funding"] = funding_rates
     except DexClientError as exc:
         logger.exception("Failed to query Aster funding rates")
-        summary["aster_funding"] = {"error": str(exc)}
+        #summary["aster_funding"] = {"error": str(exc)}
 
     print(json.dumps(summary, indent=2))
     return 0
