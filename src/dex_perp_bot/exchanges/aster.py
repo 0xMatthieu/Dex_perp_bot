@@ -249,7 +249,6 @@ class AsterClient:
     def _get_signed(self, endpoint: str, params: Optional[KeyVals] = None) -> Mapping[str, Any]:
         base_items: List[Tuple[str, Any]] = []
         # Put recvWindow first or last � order must match what you sign & send. We keep it first.
-        base_items.append(("timeInForce", "GTC"))
         base_items.append(("recvWindow", 5000))
         base_items.append(("timestamp", self._now_ms()))
 
@@ -306,13 +305,15 @@ class AsterClient:
         Signs totalParams. Sends url-encoded (not JSON) like Binance/Aster examples.
         Ensures signature is the LAST param in the chosen location.
         """
-        q_items: List[Tuple[str, Any]] = [("recvWindow", 5000), ("timestamp", self._now_ms())]
-        if query:
-            q_items.extend(list(query))
+        q_items: List[Tuple[str, Any]] = list(query) if query else []
+        b_items: List[Tuple[str, Any]] = list(body) if body else []
 
-        b_items: List[Tuple[str, Any]] = []
-        if body:
-            b_items.extend(list(body))
+        # Common parameters should go in the body if a body is present, otherwise in the query.
+        common_params = [("recvWindow", 5000), ("timestamp", self._now_ms())]
+        if body is not None:
+            b_items.extend(common_params)
+        else:
+            q_items.extend(common_params)
 
         query_str = self._urlencode(q_items)
         body_str = self._urlencode(b_items) if b_items else ""
