@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Dict
 
 from .config import Settings
@@ -72,11 +73,13 @@ def main() -> int:
         )
         summary["aster_order"] = order_response
 
-        # If order was created successfully, immediately cancel it for this test.
+        # If order was created successfully, wait 10s then cancel it for this test.
         if "orderId" in order_response and isinstance(order_response.get("orderId"), int):
             order_id = order_response["orderId"]
             symbol = order_response.get("symbol", "BTCUSDT")  # Fallback to what we know we used
-            logger.info("Successfully created order %s for %s, now cancelling.", order_id, symbol)
+            logger.info("Successfully created order %s for %s, waiting 10s before cancelling.", order_id, symbol)
+            time.sleep(10)
+            logger.info("Now cancelling order %s.", order_id)
             try:
                 cancel_response = aster_client.cancel_order(symbol=symbol, order_id=order_id)
                 summary["aster_cancel_order"] = cancel_response
