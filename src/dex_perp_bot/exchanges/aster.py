@@ -334,7 +334,8 @@ class AsterClient:
             ("side", close_side),
             ("type", "STOP_MARKET"),
             ("stopPrice", stop_price_str),
-            ("closePosition", "true"),
+            ("closePosition", "TRUE"),
+            ("priceProtect", "FALSE"),
         ]
 
         logger.info("Placing closePosition MARKET order with payload: %s", dict(order_payload))
