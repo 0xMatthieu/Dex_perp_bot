@@ -26,77 +26,75 @@ class StrategyDecision:
     leverage: int
 
 
-def determine_strategy(
+def _is_portfolio_matching_opportunity(
+    hl_positions: List[Dict],
+    aster_positions: List[Dict],
+    opportunity: FundingComparison,
+) -> bool:
+    """Checks if the current open positions match the target opportunity."""
+    if not opportunity:
+        return not hl_positions and not aster_positions
+
+    target_symbol_base = opportunity.symbol
+    target_long_venue = opportunity.long_venue
+
+    # For simplicity, assume only one position pair should be open for this strategy.
+    if len(hl_positions) > 1 or len(aster_positions) > 1 or (len(hl_positions) != len(aster_positions)):
+        return False  # Not in a clean delta-neutral state
+
+    if not hl_positions:  # and not aster_positions
+        return False  # No positions exist
+
+    hl_pos = hl_positions[0]
+    aster_pos = aster_positions[0]
+
+    hl_symbol_base = hl_pos.get("symbol", "").split('/')[0]
+    aster_symbol_base = aster_pos.get("symbol", "").replace("USDT", "")
+
+    if not (hl_symbol_base == aster_symbol_base == target_symbol_base):
+        return False  # Wrong symbol
+
+    # Check sides
+    hl_side = hl_pos.get("side")  # 'long' or 'short'
+    aster_pos_amt = Decimal(aster_pos.get("positionAmt", "0"))
+    aster_side = 'long' if aster_pos_amt > 0 else 'short'
+
+    if target_long_venue == "Hyperliquid":
+        return hl_side == 'long' and aster_side == 'short'
+    else:  # Long on Aster
+        return aster_side == 'long' and hl_side == 'short'
+
+
+def _calculate_trade_decision(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
+    best_opp: FundingComparison,
     leverage: int,
     capital_usd: Decimal,
-    min_apy_diff_pct: Decimal = Decimal("0"),
 ) -> Optional[StrategyDecision]:
-    """
-    Analyzes funding rates and market data to determine the best delta-neutral strategy.
-    """
-    # 1. Find best funding opportunity
-    opportunities = fetch_and_compare_funding_rates(aster_client, hyperliquid_client)
-    if not opportunities:
-        logger.info("No common symbols with funding rates found.")
-        return None
-
-    # Filter for imminent opportunities with a positive APY difference
-    imminent_opportunities = [
-        opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > 0
-    ]
-
-    if not imminent_opportunities:
-        logger.info("No imminent funding opportunities with positive APY difference found.")
-        return None
-
-    best_opp = imminent_opportunities[0]  # Already sorted by apy_difference
-    if best_opp.apy_difference < min_apy_diff_pct:
-        logger.info(
-            f"Best opportunity APY diff {best_opp.apy_difference:.4f}% is below threshold {min_apy_diff_pct:.4f}%. No action."
-        )
-        return None
-
-    logger.info(f"Identified best opportunity: {best_opp}")
-
-    # 2. Prepare symbols and clients for the chosen opportunity
+    """Calculates the quantities and details for a given strategy opportunity."""
+    # 1. Prepare symbols and clients for the chosen opportunity
     symbol_base = best_opp.symbol
     symbol_hl = f"{symbol_base}/USDC:USDC"
     symbol_aster = f"{symbol_base}USDT"
 
-    # Check for existing positions to decide whether to open a new trade
-    logger.info(f"Checking for existing positions for {symbol_base}...")
-    hl_positions = hyperliquid_client.get_all_positions()
-    aster_positions = aster_client.get_all_positions()
-
-    hl_position_exists = any(p.get("symbol") == symbol_hl for p in hl_positions)
-    aster_position_exists = any(p.get("symbol") == symbol_aster for p in aster_positions)
-
-    if hl_position_exists or aster_position_exists:
-        logger.info(
-            f"Existing position found for {symbol_base} on at least one venue. "
-            "Holding position to farm airdrop points. No new positions will be opened."
-        )
-        return None
-
     long_venue_client = aster_client if best_opp.long_venue == "Aster" else hyperliquid_client
     short_venue_client = hyperliquid_client if best_opp.long_venue == "Aster" else aster_client
-    
+
     long_symbol = symbol_aster if isinstance(long_venue_client, AsterClient) else symbol_hl
     short_symbol = symbol_aster if isinstance(short_venue_client, AsterClient) else symbol_hl
 
-    # 3. Get prices and filters for sizing
+    # 2. Get prices and filters for sizing
     logger.info("Fetching prices and exchange info for sizing...")
     price_long = long_venue_client.get_price(long_symbol)
     price_short = short_venue_client.get_price(short_symbol)
 
-    # 4. Calculate quantities based on capital and leverage
+    # 3. Calculate quantities based on capital and leverage
     notional_value = capital_usd * Decimal(leverage)
     qty_long = notional_value / price_long
     qty_short = notional_value / price_short
 
-    # 5. Round quantities to exchange-specific lot sizes
+    # 4. Round quantities to exchange-specific lot sizes
     if isinstance(long_venue_client, AsterClient):
         filters = long_venue_client.get_symbol_filters(long_symbol)
         step_size = filters['step_size']
@@ -114,7 +112,7 @@ def determine_strategy(
         market = short_venue_client._client.market(short_symbol)
         step_size = Decimal(str(market['precision']['amount']))
         qty_short = (qty_short // step_size) * step_size
-        
+
     if qty_long == 0 or qty_short == 0:
         logger.error("Calculated quantity is zero. Increase capital or leverage.")
         return None
@@ -128,6 +126,59 @@ def determine_strategy(
         margin=capital_usd,
         leverage=leverage,
     )
+
+
+def run_arbitrage_strategy(
+    aster_client: AsterClient,
+    hyperliquid_client: HyperliquidClient,
+    leverage: int,
+    capital_usd: Decimal,
+    min_apy_diff_pct: Decimal = Decimal("0"),
+) -> None:
+    """
+    Main strategy function to find and act on imminent funding rate opportunities.
+    It will rebalance the portfolio to match the best opportunity if not already aligned.
+    """
+    # 1. Find the best imminent funding opportunity.
+    opportunities = fetch_and_compare_funding_rates(aster_client, hyperliquid_client)
+    imminent_opportunities = [
+        opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > 0
+    ]
+
+    if not imminent_opportunities:
+        logger.info("No imminent funding opportunities found. Holding existing positions.")
+        return
+
+    best_opp = imminent_opportunities[0]  # Already sorted by APY difference
+    if best_opp.apy_difference < min_apy_diff_pct:
+        logger.info(
+            f"Best opportunity APY diff {best_opp.apy_difference:.4f}% is below threshold {min_apy_diff_pct:.4f}%. Holding positions."
+        )
+        return
+
+    logger.info(f"Identified best opportunity: {best_opp}")
+
+    # 2. Check if the current portfolio already matches the best opportunity.
+    hl_positions = hyperliquid_client.get_all_positions()
+    aster_positions = aster_client.get_all_positions()
+
+    if _is_portfolio_matching_opportunity(hl_positions, aster_positions, best_opp):
+        logger.info("Already in optimal position for imminent funding. Holding position.")
+        return
+
+    # 3. If not in the optimal position, rebalance.
+    logger.info("Portfolio does not match optimal strategy. Rebalancing.")
+    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client)
+
+    # 4. Calculate the new trade and execute it.
+    decision = _calculate_trade_decision(
+        aster_client, hyperliquid_client, best_opp, leverage, capital_usd
+    )
+
+    if decision:
+        execute_strategy(aster_client, hyperliquid_client, decision)
+    else:
+        logger.error("Failed to calculate trade decision after deciding to rebalance.")
 
 
 def execute_strategy(

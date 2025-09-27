@@ -19,7 +19,7 @@ from src.dex_perp_bot.config import Settings
 from src.dex_perp_bot.exchanges.aster import AsterClient
 from src.dex_perp_bot.exchanges.base import DexAPIError, DexClientError
 from src.dex_perp_bot.exchanges.hyperliquid import HyperliquidClient
-from src.dex_perp_bot.strategy import cleanup_all_open_positions_and_orders, determine_strategy, execute_strategy
+from src.dex_perp_bot.strategy import cleanup_all_open_positions_and_orders, run_arbitrage_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -56,15 +56,10 @@ def main() -> int:
             )
             return 0
 
-        # Find and execute the strategy
-        decision = determine_strategy(
+        # Run the arbitrage strategy, which will handle rebalancing internally.
+        run_arbitrage_strategy(
             aster_client, hyperliquid_client, leverage=4, capital_usd=capital_to_deploy
         )
-
-        if decision:
-            execute_strategy(aster_client, hyperliquid_client, decision)
-        else:
-            logger.info("No viable strategy decision was made.")
 
     except DexClientError as exc:
         logger.exception("An error occurred during the strategy execution: %s", exc)
