@@ -323,9 +323,9 @@ class AsterClient:
         # To trigger the stop order immediately, set the stopPrice slightly
         # through the current market price.
         if close_side == "SELL":  # Closing a long position
-            stop_price = current_price * Decimal("0.999")  # 0.1% below
+            stop_price = current_price * Decimal("0.9")  # 0.1% below
         else:  # Closing a short position
-            stop_price = current_price * Decimal("1.001")  # 0.1% above
+            stop_price = current_price * Decimal("1.1")  # 0.1% above
 
         # Round to tick_size
         stop_price = round(stop_price / tick_size) * tick_size
