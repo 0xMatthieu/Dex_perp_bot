@@ -226,6 +226,25 @@ class AsterClient:
         print("Final order payload:", dict(order_payload))
         return order_response
 
+    def cancel_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Cancel an active order on Aster for a given symbol."""
+        if order_id is None and orig_client_order_id is None:
+            raise ValueError("Either order_id or orig_client_order_id must be provided")
+
+        params: List[Tuple[str, Any]] = [("symbol", symbol)]
+        if order_id is not None:
+            params.append(("orderId", order_id))
+        if orig_client_order_id is not None:
+            params.append(("origClientOrderId", orig_client_order_id))
+
+        logger.info("Canceling order with params: %s", dict(params))
+        return self._delete_signed("/fapi/v1/order", params=params)
+
     # -------- GET SIGNED (query only) --------
     def _get_signed(self, endpoint: str, params: Optional[KeyVals] = None) -> Mapping[str, Any]:
         base_items: List[Tuple[str, Any]] = []
@@ -248,6 +267,28 @@ class AsterClient:
         full_url = f"{url}?{full_query}"
         logger.info("Aster GET: %s", full_url)
         r = self._session.get(full_url, headers=self._headers(), timeout=self._config.request_timeout)
+        self._raise_for_json(r)
+        return r.json()
+
+    # -------- DELETE SIGNED (query only) --------
+    def _delete_signed(self, endpoint: str, params: Optional[KeyVals] = None) -> Mapping[str, Any]:
+        base_items: List[Tuple[str, Any]] = []
+        base_items.append(("recvWindow", 5000))
+        base_items.append(("timestamp", self._now_ms()))
+
+        if params:
+            base_items.extend(list(params))
+
+        query_str = self._urlencode(base_items)
+        logger.info("Signing payload for DELETE: %s", query_str)
+        sig = self._sign(query_str)
+
+        url = f"{self._config.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+        full_query = f"{query_str}&signature={sig}"
+
+        full_url = f"{url}?{full_query}"
+        logger.info("Aster DELETE: %s", full_url)
+        r = self._session.delete(full_url, headers=self._headers(), timeout=self._config.request_timeout)
         self._raise_for_json(r)
         return r.json()
 

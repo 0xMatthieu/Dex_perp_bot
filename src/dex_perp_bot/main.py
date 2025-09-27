@@ -71,6 +71,22 @@ def main() -> int:
             margin_usd=20.0,
         )
         summary["aster_order"] = order_response
+
+        # If order was created successfully, immediately cancel it for this test.
+        if "orderId" in order_response and isinstance(order_response.get("orderId"), int):
+            order_id = order_response["orderId"]
+            symbol = order_response.get("symbol", "BTCUSDT")  # Fallback to what we know we used
+            logger.info("Successfully created order %s for %s, now cancelling.", order_id, symbol)
+            try:
+                cancel_response = aster_client.cancel_order(symbol=symbol, order_id=order_id)
+                summary["aster_cancel_order"] = cancel_response
+                logger.info("Successfully cancelled order %s.", order_id)
+            except DexClientError as exc_cancel:
+                logger.exception("Failed to cancel order on Aster")
+                summary["aster_cancel_order"] = {"error": str(exc_cancel)}
+        else:
+            logger.warning("Order creation did not return an orderId, skipping cancellation.")
+
     except (DexClientError, ValueError) as exc:
         logger.exception("Failed to create order on Aster")
         summary["aster_order"] = {"error": str(exc)}
