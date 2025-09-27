@@ -150,3 +150,85 @@ def execute_strategy(
     logger.info(f"Short order ({decision.opportunity.short_venue}) response: {short_order_res}")
     
     logger.info("Strategy execution complete.")
+
+
+def cleanup_all_open_positions_and_orders(
+    aster_client: AsterClient,
+    hyperliquid_client: HyperliquidClient,
+) -> None:
+    """
+    Cleans up by cancelling all open orders and closing all open positions.
+    """
+    logger.info("--- Starting cleanup: Cancelling all open orders and closing all positions ---")
+
+    # 1. Cancel all open orders to prevent them from creating new positions
+    logger.info("--- Cancelling open orders ---")
+    try:
+        aster_orders = aster_client.get_all_open_orders()
+        if aster_orders:
+            logger.info(f"Found {len(aster_orders)} open order(s) on Aster. Cancelling them...")
+            for order in aster_orders:
+                symbol = order.get("symbol")
+                client_order_id = order.get("clientOrderId")
+                if symbol and client_order_id:
+                    try:
+                        aster_client.cancel_order(symbol=symbol, orig_client_order_id=client_order_id)
+                    except Exception as exc:
+                        logger.error(f"Failed to cancel order {client_order_id} for {symbol} on Aster: {exc}")
+        else:
+            logger.info("No open orders found on Aster.")
+    except Exception as exc:
+        logger.error(f"Failed to get open orders from Aster: {exc}")
+
+    try:
+        hl_orders = hyperliquid_client.get_all_open_orders()
+        if hl_orders:
+            logger.info(f"Found {len(hl_orders)} open order(s) on Hyperliquid. Cancelling them...")
+            for order in hl_orders:
+                symbol = order.get("symbol")
+                order_id = order.get("id")
+                if symbol and order_id:
+                    try:
+                        hyperliquid_client.cancel_order(symbol=symbol, order_id=order_id)
+                    except Exception as exc:
+                        logger.error(f"Failed to cancel order {order_id} for {symbol} on Hyperliquid: {exc}")
+        else:
+            logger.info("No open orders found on Hyperliquid.")
+    except Exception as exc:
+        logger.error(f"Failed to get open orders from Hyperliquid: {exc}")
+
+    # 2. Close all open positions
+    logger.info("--- Closing open positions ---")
+    try:
+        aster_positions = aster_client.get_all_positions()
+        if aster_positions:
+            logger.info(f"Found {len(aster_positions)} open position(s) on Aster. Closing them...")
+            for pos in aster_positions:
+                symbol = pos.get("symbol")
+                if symbol:
+                    try:
+                        aster_client.close_position(symbol)
+                    except Exception as exc:
+                        logger.error(f"Failed to close position for {symbol} on Aster: {exc}")
+        else:
+            logger.info("No open positions found on Aster.")
+    except Exception as exc:
+        logger.error(f"Failed to get positions from Aster: {exc}")
+
+    try:
+        hl_positions = hyperliquid_client.get_all_positions()
+        if hl_positions:
+            logger.info(f"Found {len(hl_positions)} open position(s) on Hyperliquid. Closing them...")
+            for pos in hl_positions:
+                symbol = pos.get("symbol")
+                if symbol:
+                    try:
+                        hyperliquid_client.close_position(symbol)
+                    except Exception as exc:
+                        logger.error(f"Failed to close position for {symbol} on Hyperliquid: {exc}")
+        else:
+            logger.info("No open positions found on Hyperliquid.")
+    except Exception as exc:
+        logger.error(f"Failed to get positions from Hyperliquid: {exc}")
+
+    logger.info("--- Cleanup complete ---")

@@ -52,6 +52,27 @@ class HyperliquidClient:
 
         return WalletBalance(total=total, available=available, raw=balance)
 
+    def get_all_open_orders(self) -> List[Dict[str, Any]]:
+        """Fetch all open orders."""
+        logger.debug("Fetching all open orders from Hyperliquid")
+        try:
+            # Returns a list of ccxt order structures
+            return self._client.fetch_open_orders()
+        except Exception as exc:
+            raise DexAPIError("Failed to fetch Hyperliquid open orders") from exc
+
+    def get_all_positions(self) -> List[Dict[str, Any]]:
+        """Fetch all open positions."""
+        logger.debug("Fetching all open positions from Hyperliquid")
+        try:
+            positions = self._client.fetch_positions()
+            # The ccxt method returns a list of position structures.
+            # Filter for positions that are actually open (non-zero contracts).
+            open_positions = [p for p in positions if to_decimal(p.get("contracts")) and not to_decimal(p.get("contracts")).is_zero()]
+            return open_positions
+        except Exception as exc:
+            raise DexAPIError("Failed to fetch Hyperliquid positions") from exc
+
     def get_predicted_funding_rates(self) -> List[Tuple[str, List[Tuple[str, Dict[str, Any]]]]]:
         """Retrieve predicted funding rates for different venues."""
         try:

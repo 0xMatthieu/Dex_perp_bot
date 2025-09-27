@@ -320,6 +320,16 @@ class AsterClient:
         print("Final order payload:", dict(order_payload))
         return order_response
 
+    def get_all_open_orders(self) -> List[Dict[str, Any]]:
+        """Query all open orders."""
+        logger.debug("Fetching all open orders from Aster")
+        try:
+            # Empty params will fetch for all symbols
+            return self._get_signed("/fapi/v1/openOrders", params=[])
+        except DexAPIError as exc:
+            logger.error("Failed to fetch all open orders from Aster: %s", exc)
+            return []
+
     def get_open_order(
         self,
         symbol: str,
@@ -356,6 +366,26 @@ class AsterClient:
         else:
             logger.info("Order %s not found or already filled. Closing position for %s.", client_order_id, symbol)
             return self.close_position(symbol=symbol)
+
+    def get_all_positions(self) -> List[Dict[str, Any]]:
+        """Fetch all open positions from the account endpoint."""
+        logger.debug("Fetching account info to find all open positions")
+        account_info = self._get_signed("/fapi/v4/account")
+        positions = account_info.get("positions")
+        if not isinstance(positions, list):
+            raise DexAPIError("Account response did not contain a 'positions' list")
+
+        open_positions = []
+        for position in positions:
+            if isinstance(position, dict):
+                try:
+                    position_amt = Decimal(position.get("positionAmt", "0"))
+                    if not position_amt.is_zero():
+                        open_positions.append(position)
+                except InvalidOperation:
+                    logger.warning(f"Could not parse positionAmt for position: {position}")
+                    continue
+        return open_positions
 
     def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Fetch position information for a single symbol from the account endpoint."""
