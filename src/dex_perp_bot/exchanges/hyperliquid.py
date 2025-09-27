@@ -129,6 +129,31 @@ class HyperliquidClient:
         })
         return order_response
 
+    def cancel_or_close(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        """Cancels an open order or closes the position if the order was filled."""
+        logger.info("Checking status of order %s for %s to cancel or close.", order_id, symbol)
+
+        try:
+            order = self._client.fetch_order(id=order_id, symbol=symbol)
+        except Exception as exc:
+            # ccxt might raise OrderNotFound if it's not in the open/closed history.
+            # This could mean it was filled and is now a position.
+            logger.warning("Could not fetch order %s, assuming it was filled. Will try to close position. Error: %s", order_id, exc)
+            return self.close_position(symbol=symbol)
+
+        status = order.get("status")
+        logger.info("Order %s has status: '%s'", order_id, status)
+
+        if status == 'open':
+            logger.info("Order %s is open, cancelling it.", order_id)
+            return self.cancel_order(symbol=symbol, order_id=order_id)
+        elif status == 'closed':  # 'closed' in ccxt means filled
+            logger.info("Order %s is filled (closed). Closing position for %s.", order_id, symbol)
+            return self.close_position(symbol=symbol)
+        else:  # e.g., 'canceled', or something else.
+            logger.info("Order %s is already '%s'. No action taken.", order_id, status)
+            return {"status": "no_action_needed", "reason": f"Order status was '{status}'"}
+
     def cancel_order(
         self,
         symbol: str,

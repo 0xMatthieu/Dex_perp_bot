@@ -235,6 +235,43 @@ class AsterClient:
         print("Final order payload:", dict(order_payload))
         return order_response
 
+    def get_open_order(
+        self,
+        symbol: str,
+        order_id: Optional[int] = None,
+        orig_client_order_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Query a specific open order by ID or client ID."""
+        if order_id is None and orig_client_order_id is None:
+            raise ValueError("Either order_id or orig_client_order_id must be provided")
+
+        params: List[Tuple[str, Any]] = [("symbol", symbol)]
+        if order_id is not None:
+            params.append(("orderId", order_id))
+        if orig_client_order_id is not None:
+            params.append(("origClientOrderId", orig_client_order_id))
+
+        try:
+            return self._get_signed("/fapi/v1/openOrder", params=params)
+        except DexAPIError as exc:
+            # Per docs, "Order does not exist" is returned for filled/cancelled orders.
+            if "Order does not exist" in str(exc):
+                return None
+            raise  # re-raise other errors
+
+    def cancel_or_close(self, symbol: str, client_order_id: str) -> Dict[str, Any]:
+        """Cancels an open order or closes the position if the order was filled."""
+        logger.info("Checking status of order %s for %s to cancel or close.", client_order_id, symbol)
+
+        open_order = self.get_open_order(symbol=symbol, orig_client_order_id=client_order_id)
+
+        if open_order:
+            logger.info("Order %s is still open, cancelling it.", client_order_id)
+            return self.cancel_order(symbol=symbol, orig_client_order_id=client_order_id)
+        else:
+            logger.info("Order %s not found or already filled. Closing position for %s.", client_order_id, symbol)
+            return self.close_position(symbol=symbol)
+
     def get_position(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Fetch position information for a single symbol from the account endpoint."""
         logger.debug("Fetching account info to find position for %s", symbol)
