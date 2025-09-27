@@ -109,6 +109,8 @@ class AsterClient:
             params["endTime"] = end_time
         if limit is not None:
             params["limit"] = limit
+        else:
+            params["limit"] = 1000
 
         try:
             response = self._session.get(url, params=params, timeout=self._config.request_timeout)
