@@ -173,8 +173,6 @@ def fetch_and_compare_funding_rates(
     aster_rates_raw = aster_client.get_funding_rate()
     hyperliquid_rates_raw = hyperliquid_client.get_predicted_funding_rates()
 
-    aster_rates = _parse_aster_funding_rates(aster_rates_raw, aster_client)
-    hyperliquid_rates = _parse_hyperliquid_funding_rates(hyperliquid_rates_raw, hyperliquid_client)
 
     common_symbols = sorted(list(set(aster_rates.keys()) & set(hyperliquid_rates.keys())))
 
