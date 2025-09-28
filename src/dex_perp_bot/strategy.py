@@ -139,41 +139,48 @@ def run_arbitrage_strategy(
     Main strategy function to find and act on imminent funding rate opportunities.
     It will rebalance the portfolio to match the best opportunity if not already aligned.
     """
-    # 1. Find the best imminent funding opportunity.
+    # 1. Find all imminent funding opportunities that meet the APY threshold.
     opportunities = fetch_and_compare_funding_rates(aster_client, hyperliquid_client)
     imminent_opportunities = [
-        opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > 0
+        opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > min_apy_diff_pct
     ]
 
     if not imminent_opportunities:
-        logger.info("No imminent funding opportunities found. Holding existing positions.")
+        logger.info("No imminent funding opportunities meeting APY threshold found. Holding existing positions.")
         return
 
-    best_opp = imminent_opportunities[0]  # Already sorted by APY difference
-    if best_opp.apy_difference < min_apy_diff_pct:
-        logger.info(
-            f"Best opportunity APY diff {best_opp.apy_difference:.4f}% is below threshold {min_apy_diff_pct:.4f}%. Holding positions."
-        )
+    # 2. Iterate through opportunities to find the first one that is actionable.
+    best_opp = None
+    effective_leverage = 0
+    for opportunity in imminent_opportunities:
+        symbol_base = opportunity.symbol
+        symbol_hl = f"{symbol_base}/USDC:USDC"
+        symbol_aster = f"{symbol_base}USDT"
+
+        try:
+            # Determine effective leverage based on exchange limits.
+            max_leverage_hl = hyperliquid_client.get_max_leverage(symbol_hl)
+            max_leverage_aster = aster_client.get_max_leverage(symbol_aster)
+            effective_leverage = min(leverage, max_leverage_hl, max_leverage_aster)
+
+            logger.info(
+                f"Opportunity for {symbol_base} is viable. "
+                f"Max leverage: Hyperliquid={max_leverage_hl}x, Aster={max_leverage_aster}x. "
+                f"Effective leverage set to {effective_leverage}x."
+            )
+            best_opp = opportunity
+            break  # Found a viable opportunity, proceed with this one.
+        except Exception as exc:
+            logger.warning(
+                f"Skipping opportunity for {symbol_base} because market data could not be fetched: {exc}"
+            )
+            continue
+
+    if not best_opp:
+        logger.info("No actionable funding opportunities found after checking market data. Holding positions.")
         return
 
-    logger.info(f"Identified best opportunity: {best_opp}")
-
-    # 2. Determine effective leverage based on exchange limits.
-    symbol_base = best_opp.symbol
-    symbol_hl = f"{symbol_base}/USDC:USDC"
-    symbol_aster = f"{symbol_base}USDT"
-
-    try:
-        max_leverage_hl = hyperliquid_client.get_max_leverage(symbol_hl)
-        max_leverage_aster = aster_client.get_max_leverage(symbol_aster)
-        effective_leverage = min(leverage, max_leverage_hl, max_leverage_aster)
-        logger.info(
-            f"Max leverage for {symbol_base}: Hyperliquid={max_leverage_hl}x, Aster={max_leverage_aster}x. "
-            f"Effective leverage set to {effective_leverage}x."
-        )
-    except Exception as exc:
-        logger.error("Could not determine max leverage, skipping trade. Error: %s", exc)
-        return
+    logger.info(f"Selected best actionable opportunity: {best_opp}")
 
     # 3. Check if the current portfolio already matches the best opportunity.
     hl_positions = hyperliquid_client.get_all_positions()
