@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -9,6 +10,8 @@ from typing import Dict, List, Optional
 from .exchanges.aster import AsterClient
 from .exchanges.hyperliquid import HyperliquidClient
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class FundingRate:
@@ -17,6 +20,8 @@ class FundingRate:
     rate: Decimal
     apy: Decimal
     next_funding_time_ms: Optional[int]
+    max_leverage: Optional[int] = None
+    is_tradable: bool = False
 
 
 @dataclass(frozen=True)
@@ -28,12 +33,17 @@ class FundingComparison:
     apy_difference: Decimal
     funding_is_imminent: bool
     next_funding_time_ms: Optional[int]
+    long_max_leverage: Optional[int]
+    short_max_leverage: Optional[int]
+    is_actionable: bool
 
     def __str__(self) -> str:
         imminent_str = " (IMMINENT)" if self.funding_is_imminent else ""
+        actionable_str = "" if self.is_actionable else " (NOT ACTIONABLE)"
+        leverage_str = f"Lvg: {self.long_max_leverage or 'N/A'}x/{self.short_max_leverage or 'N/A'}x"
         return (
             f"Long {self.symbol} on {self.long_venue}, Short on {self.short_venue}: "
-            f"APY Difference = {self.apy_difference:.4f}%{imminent_str}"
+            f"APY Difference = {self.apy_difference:.4f}%{imminent_str}{actionable_str} | {leverage_str}"
         )
 
 
@@ -63,7 +73,7 @@ def _calculate_apy(rate: Decimal, periods_per_day: int) -> Decimal:
     return rate * periods_per_day * 365 * 100
 
 
-def _parse_aster_funding_rates(raw_rates: List[Dict]) -> Dict[str, FundingRate]:
+def _parse_aster_funding_rates(raw_rates: List[Dict], aster_client: AsterClient) -> Dict[str, FundingRate]:
     """Parse and normalize funding rates from Aster."""
     parsed: Dict[str, FundingRate] = {}
     # Calculate the single next funding time for all Aster pairs.
@@ -80,13 +90,27 @@ def _parse_aster_funding_rates(raw_rates: List[Dict]) -> Dict[str, FundingRate]:
         rate = Decimal(rate_str)
         # Aster funding is every 4 hours (6 times a day)
         apy = _calculate_apy(rate, periods_per_day=6)
+
+        max_leverage = None
+        is_tradable = False
+        try:
+            max_leverage = aster_client.get_max_leverage(symbol)
+            is_tradable = True
+        except Exception as e:
+            logger.debug(f"Could not get market data for {symbol} on Aster: {e}")
+
         parsed[normalized_symbol] = FundingRate(
-            symbol=normalized_symbol, rate=rate, apy=apy, next_funding_time_ms=next_funding_time_ms
+            symbol=normalized_symbol,
+            rate=rate,
+            apy=apy,
+            next_funding_time_ms=next_funding_time_ms,
+            max_leverage=max_leverage,
+            is_tradable=is_tradable,
         )
     return parsed
 
 
-def _parse_hyperliquid_funding_rates(raw_rates: List) -> Dict[str, FundingRate]:
+def _parse_hyperliquid_funding_rates(raw_rates: List, hyperliquid_client: HyperliquidClient) -> Dict[str, FundingRate]:
     """Parse and normalize funding rates from Hyperliquid."""
     parsed: Dict[str, FundingRate] = {}
     for asset_data in raw_rates:
@@ -105,6 +129,15 @@ def _parse_hyperliquid_funding_rates(raw_rates: List) -> Dict[str, FundingRate]:
         if not isinstance(hl_rate_info, dict):
             continue
 
+        hl_symbol = f"{symbol}/USDC:USDC"
+        max_leverage = None
+        is_tradable = False
+        try:
+            max_leverage = hyperliquid_client.get_max_leverage(hl_symbol)
+            is_tradable = True
+        except Exception as e:
+            logger.debug(f"Could not get market data for {hl_symbol} on Hyperliquid: {e}")
+
         rate_str = hl_rate_info.get("fundingRate")
         if not rate_str:
             continue
@@ -117,7 +150,12 @@ def _parse_hyperliquid_funding_rates(raw_rates: List) -> Dict[str, FundingRate]:
 
         apy = _calculate_apy(rate, periods_per_day=24)
         parsed[symbol] = FundingRate(
-            symbol=symbol, rate=rate, apy=apy, next_funding_time_ms=next_funding_time_ms
+            symbol=symbol,
+            rate=rate,
+            apy=apy,
+            next_funding_time_ms=next_funding_time_ms,
+            max_leverage=max_leverage,
+            is_tradable=is_tradable,
         )
     return parsed
 
@@ -136,8 +174,8 @@ def fetch_and_compare_funding_rates(
     hyperliquid_rates_raw = hyperliquid_client.get_predicted_funding_rates()
 
     print("--- Parsing and Comparing Funding Rates ---")
-    aster_rates = _parse_aster_funding_rates(aster_rates_raw)
-    hyperliquid_rates = _parse_hyperliquid_funding_rates(hyperliquid_rates_raw)
+    aster_rates = _parse_aster_funding_rates(aster_rates_raw, aster_client)
+    hyperliquid_rates = _parse_hyperliquid_funding_rates(hyperliquid_rates_raw, hyperliquid_client)
 
     common_symbols = sorted(list(set(aster_rates.keys()) & set(hyperliquid_rates.keys())))
 
@@ -157,6 +195,8 @@ def fetch_and_compare_funding_rates(
             if 0 < time_diff_ms <= minutes_to_ms:
                 funding_is_imminent_s1 = True
 
+        is_actionable = aster_rate.is_tradable and hyperliquid_rate.is_tradable
+
         comparisons.append(FundingComparison(
             symbol=symbol,
             long_venue="Aster",
@@ -164,6 +204,9 @@ def fetch_and_compare_funding_rates(
             apy_difference=aster_rate.apy - hyperliquid_rate.apy,
             funding_is_imminent=funding_is_imminent_s1,
             next_funding_time_ms=next_funding_time_s1,
+            long_max_leverage=aster_rate.max_leverage,
+            short_max_leverage=hyperliquid_rate.max_leverage,
+            is_actionable=is_actionable,
         ))
 
         # Scenario 2: Long Hyperliquid, Short Aster
@@ -181,6 +224,9 @@ def fetch_and_compare_funding_rates(
             apy_difference=hyperliquid_rate.apy - aster_rate.apy,
             funding_is_imminent=funding_is_imminent_s2,
             next_funding_time_ms=next_funding_time_s2,
+            long_max_leverage=hyperliquid_rate.max_leverage,
+            short_max_leverage=aster_rate.max_leverage,
+            is_actionable=is_actionable,
         ))
 
     # Sort by the highest APY difference
