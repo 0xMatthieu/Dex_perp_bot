@@ -44,7 +44,7 @@ def main() -> int:
     except DexAPIError as exc:
         logger.error("Failed to sync time with Aster: %s", exc)
 
-    LOOP_INTERVAL_SECONDS = 10  # For testing, run every 10 seconds.
+    LOOP_INTERVAL_SECONDS = 60  # For testing, run every 10 seconds.
     logger.info(f"Starting strategy loop. Running every {LOOP_INTERVAL_SECONDS} seconds. Press Ctrl+C to stop.")
 
     try:
