@@ -67,26 +67,27 @@ class Settings:
         )
 
         aster_credentials = AsterCredentials(
-            api_key=_require_env("ASTER_API_KEY"),
-            api_secret=_require_env("ASTER_API_SECRET"),
+            api_key=_require_env("ASTER_API_KEY").strip(),
+            api_secret=_require_env("ASTER_API_SECRET").strip(),
         )
+
         aster_config = AsterConfig(
-            account_id=os.getenv("ASTER_ACCOUNT_ID"),
-            base_url=os.getenv("ASTER_BASE_URL", "https://api.prod.asterperp.xyz/api"),
-            balance_endpoint=os.getenv("ASTER_BALANCE_ENDPOINT", "/v1/perp/account-summary"),
-            response_path=_split_path(os.getenv("ASTER_RESPONSE_PATH", "data.account")),
-            available_fields=_split_csv(
-                os.getenv(
-                    "ASTER_AVAILABLE_FIELDS",
-                    "availableBalance,availableMargin,freeCollateral,withdrawable",
-                )
-            ),
-            total_fields=_split_csv(
-                os.getenv(
-                    "ASTER_TOTAL_FIELDS",
-                    "totalBalance,totalCollateral,accountValue",
-                )
-            ),
+            account_id=None,  # not needed for Aster fapi endpoints
+            base_url=os.getenv("ASTER_BASE_URL", "https://fapi.asterdex.com"),
+            # prefer /fapi/v4/account because it exposes totals + available in one payload
+            balance_endpoint=os.getenv("ASTER_BALANCE_ENDPOINT", "/fapi/v4/account"),
+            # v4/account returns a top-level object; leave path empty to use the root
+            response_path=_split_path(os.getenv("ASTER_RESPONSE_PATH", "")),
+            # "available" candidates: availableBalance, maxWithdrawAmount, totalMarginBalance (fallback)
+            available_fields=_split_csv(os.getenv(
+                "ASTER_AVAILABLE_FIELDS",
+                "availableBalance,maxWithdrawAmount,totalMarginBalance",
+            )),
+            # "total" candidates from v4/account: totalWalletBalance, totalMarginBalance
+            total_fields=_split_csv(os.getenv(
+                "ASTER_TOTAL_FIELDS",
+                "totalWalletBalance,totalMarginBalance",
+            )),
             request_timeout=float(os.getenv("ASTER_TIMEOUT", "10")),
         )
 
