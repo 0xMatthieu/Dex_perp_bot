@@ -44,21 +44,33 @@ def main() -> int:
         logger.error("Failed to sync time with Aster: %s", exc)
 
     try:
+        leverage = 4
+        # Use 100% of the available capital. To be more conservative, set this below 1.0.
+        capital_allocation_pct = Decimal("1.0")
+
         # Determine capital from the smaller of the two available balances
         balance_hl = hyperliquid_client.get_wallet_balance().available or Decimal("0")
         balance_aster = aster_client.get_wallet_balance().available or Decimal("0")
-        capital_to_deploy = min(balance_hl, balance_aster)
+        available_capital = min(balance_hl, balance_aster)
+        capital_to_deploy = available_capital * capital_allocation_pct
+
+        logger.info(
+            f"Available capital (min across exchanges): ${available_capital:.2f}. "
+            f"Allocating {capital_allocation_pct:.0%} (${capital_to_deploy:.2f}) with {leverage}x leverage."
+        )
+        notional_position_size = capital_to_deploy * Decimal(leverage)
+        logger.info(f"Target notional position size per leg: ${notional_position_size:.2f}")
 
         if capital_to_deploy <= Decimal("10"):  # Minimum trade size check
             logger.warning(
                 f"Insufficient capital to deploy strategy. "
-                f"Min available balance is ${capital_to_deploy:.2f}. Needs > $10."
+                f"Allocated capital is ${capital_to_deploy:.2f}, which is below the $10 minimum."
             )
             return 0
 
         # Run the arbitrage strategy, which will handle rebalancing internally.
         run_arbitrage_strategy(
-            aster_client, hyperliquid_client, leverage=4, capital_usd=capital_to_deploy
+            aster_client, hyperliquid_client, leverage=leverage, capital_usd=capital_to_deploy
         )
 
     except DexClientError as exc:
