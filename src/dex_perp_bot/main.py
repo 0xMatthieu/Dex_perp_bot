@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 
 # Add project root to path to allow importing from `tests`
@@ -43,41 +44,49 @@ def main() -> int:
     except DexAPIError as exc:
         logger.error("Failed to sync time with Aster: %s", exc)
 
+    LOOP_INTERVAL_SECONDS = 10  # For testing, run every 10 seconds.
+    logger.info(f"Starting strategy loop. Running every {LOOP_INTERVAL_SECONDS} seconds. Press Ctrl+C to stop.")
+
     try:
-        leverage = 4
-        # Use 100% of the available capital. To be more conservative, set this below 1.0.
-        capital_allocation_pct = Decimal("0.25")
+        while True:
+            try:
+                leverage = 4
+                # Use 100% of the available capital. To be more conservative, set this below 1.0.
+                capital_allocation_pct = Decimal("0.25")
 
-        # Determine capital from the smaller of the two available balances
-        balance_hl = hyperliquid_client.get_wallet_balance().available or Decimal("0")
-        balance_aster = aster_client.get_wallet_balance().available or Decimal("0")
-        available_capital = min(balance_hl, balance_aster)
-        capital_to_deploy = available_capital * capital_allocation_pct
+                # Determine capital from the smaller of the two available balances
+                balance_hl = hyperliquid_client.get_wallet_balance().available or Decimal("0")
+                balance_aster = aster_client.get_wallet_balance().available or Decimal("0")
+                available_capital = min(balance_hl, balance_aster)
+                capital_to_deploy = available_capital * capital_allocation_pct
 
-        logger.info(
-            f"Available capital (min across exchanges): ${available_capital:.2f}. "
-            f"Allocating {capital_allocation_pct:.0%} (${capital_to_deploy:.2f}) with {leverage}x leverage."
-        )
-        notional_position_size = capital_to_deploy * Decimal(leverage)
-        logger.info(f"Target notional position size per leg: ${notional_position_size:.2f}")
+                logger.info(
+                    f"Available capital (min across exchanges): ${available_capital:.2f}. "
+                    f"Allocating {capital_allocation_pct:.0%} (${capital_to_deploy:.2f}) with {leverage}x leverage."
+                )
+                notional_position_size = capital_to_deploy * Decimal(leverage)
+                logger.info(f"Target notional position size per leg: ${notional_position_size:.2f}")
 
-        if capital_to_deploy <= Decimal("10"):  # Minimum trade size check
-            logger.warning(
-                f"Insufficient capital to deploy strategy. "
-                f"Allocated capital is ${capital_to_deploy:.2f}, which is below the $10 minimum."
-            )
-            return 0
+                if capital_to_deploy <= Decimal("10"):  # Minimum trade size check
+                    logger.warning(
+                        f"Insufficient capital to deploy strategy. "
+                        f"Allocated capital is ${capital_to_deploy:.2f}, which is below the $10 minimum."
+                    )
+                else:
+                    # Run the arbitrage strategy, which will handle rebalancing internally.
+                    run_arbitrage_strategy(
+                        aster_client, hyperliquid_client, leverage=leverage, capital_usd=capital_to_deploy
+                    )
 
-        # Run the arbitrage strategy, which will handle rebalancing internally.
-        run_arbitrage_strategy(
-            aster_client, hyperliquid_client, leverage=leverage, capital_usd=capital_to_deploy
-        )
+            except DexClientError as exc:
+                logger.exception("An error occurred during the strategy execution cycle: %s", exc)
 
-    except DexClientError as exc:
-        logger.exception("An error occurred during the strategy execution: %s", exc)
-        return 1
+            logger.info(f"Strategy cycle complete. Waiting for {LOOP_INTERVAL_SECONDS} seconds...")
+            time.sleep(LOOP_INTERVAL_SECONDS)
 
-    return 0
+    except KeyboardInterrupt:
+        logger.info("Shutdown signal received. Exiting.")
+        return 0
 
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation entry point
