@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 def main() -> int:
     """Load configuration, initialize clients, and run the delta-neutral strategy."""
-    log_filename = f"bot_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+    log_filename = f"logs/bot_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
