@@ -167,6 +167,9 @@ def run_forced_strategy_test(aster_client: AsterClient, hyperliquid_client: Hype
         apy_difference=Decimal("100"),
         funding_is_imminent=True,
         next_funding_time_ms=int(time.time() * 1000) + 60000,
+        long_max_leverage=50,   # Dummy value for testing
+        short_max_leverage=20,  # Dummy value for testing
+        is_actionable=True,     # Must be true for the strategy to proceed
     )
 
     # 2. Mock the funding fetcher to return our fake opportunity
