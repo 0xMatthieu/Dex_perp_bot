@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Dict, List, Optional
 
@@ -36,6 +37,27 @@ class FundingComparison:
         )
 
 
+def _get_next_aster_funding_time_ms() -> int:
+    """
+    Calculates the next funding time for Aster, assuming funding at 00, 08, 16 UTC.
+    """
+    now = datetime.now(timezone.utc)
+    funding_hours = [0, 8, 16]
+
+    next_funding_dt = None
+    for hour in funding_hours:
+        potential_dt = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if potential_dt > now:
+            next_funding_dt = potential_dt
+            break
+
+    if next_funding_dt is None:  # all of today's funding times have passed
+        tomorrow = now + timedelta(days=1)
+        next_funding_dt = tomorrow.replace(hour=funding_hours[0], minute=0, second=0, microsecond=0)
+
+    return int(next_funding_dt.timestamp() * 1000)
+
+
 def _calculate_apy(rate: Decimal, periods_per_day: int) -> Decimal:
     """Calculate annualized percentage rate from a funding rate."""
     return rate * periods_per_day * 365 * 100
@@ -44,6 +66,9 @@ def _calculate_apy(rate: Decimal, periods_per_day: int) -> Decimal:
 def _parse_aster_funding_rates(raw_rates: List[Dict]) -> Dict[str, FundingRate]:
     """Parse and normalize funding rates from Aster."""
     parsed: Dict[str, FundingRate] = {}
+    # Calculate the single next funding time for all Aster pairs.
+    next_funding_time_ms = _get_next_aster_funding_time_ms()
+
     for item in raw_rates:
         symbol = item.get("symbol")
         rate_str = item.get("fundingRate")
@@ -53,12 +78,10 @@ def _parse_aster_funding_rates(raw_rates: List[Dict]) -> Dict[str, FundingRate]:
         # Normalize symbol from BTCUSDT -> BTC
         normalized_symbol = symbol.replace("USDT", "").replace("USD", "")
         rate = Decimal(rate_str)
-        funding_time_ms_raw = item.get("fundingTime")
-        funding_time_ms = int(funding_time_ms_raw) if funding_time_ms_raw is not None else None
         # Aster funding is typically every 8 hours (3 times a day)
         apy = _calculate_apy(rate, periods_per_day=3)
         parsed[normalized_symbol] = FundingRate(
-            symbol=normalized_symbol, rate=rate, apy=apy, next_funding_time_ms=funding_time_ms
+            symbol=normalized_symbol, rate=rate, apy=apy, next_funding_time_ms=next_funding_time_ms
         )
     return parsed
 
@@ -161,8 +184,13 @@ def fetch_and_compare_funding_rates(
     # Sort by the highest APY difference
     sorted_comparisons = sorted(comparisons, key=lambda x: x.apy_difference, reverse=True)
 
-    print("\n--- All Funding Rate Arbitrage Opportunities (Sorted) ---")
-    for comp in sorted_comparisons:
-        print(comp)
+    top_4_comparisons = sorted_comparisons[:4]
 
-    return sorted_comparisons[:4]
+    print("\n--- Top 4 Funding Rate Arbitrage Opportunities ---")
+    if not top_4_comparisons:
+        print("No opportunities found.")
+    else:
+        for comp in top_4_comparisons:
+            print(comp)
+
+    return top_4_comparisons
