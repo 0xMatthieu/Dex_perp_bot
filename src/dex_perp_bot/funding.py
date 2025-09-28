@@ -20,8 +20,6 @@ class FundingRate:
     rate: Decimal
     apy: Decimal
     next_funding_time_ms: Optional[int]
-    max_leverage: Optional[int] = None
-    is_tradable: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,21 +89,11 @@ def _parse_aster_funding_rates(raw_rates: List[Dict], aster_client: AsterClient)
         # Aster funding is every 4 hours (6 times a day)
         apy = _calculate_apy(rate, periods_per_day=6)
 
-        max_leverage = None
-        is_tradable = False
-        try:
-            max_leverage = aster_client.get_max_leverage(symbol)
-            is_tradable = True
-        except Exception as e:
-            logger.debug(f"Could not get market data for {symbol} on Aster: {e}")
-
         parsed[normalized_symbol] = FundingRate(
             symbol=normalized_symbol,
             rate=rate,
             apy=apy,
             next_funding_time_ms=next_funding_time_ms,
-            max_leverage=max_leverage,
-            is_tradable=is_tradable,
         )
     return parsed
 
@@ -129,15 +117,6 @@ def _parse_hyperliquid_funding_rates(raw_rates: List, hyperliquid_client: Hyperl
         if not isinstance(hl_rate_info, dict):
             continue
 
-        hl_symbol = f"{symbol}/USDC:USDC"
-        max_leverage = None
-        is_tradable = False
-        try:
-            max_leverage = hyperliquid_client.get_max_leverage(hl_symbol)
-            is_tradable = True
-        except Exception as e:
-            logger.debug(f"Could not get market data for {hl_symbol} on Hyperliquid: {e}")
-
         rate_str = hl_rate_info.get("fundingRate")
         if not rate_str:
             continue
@@ -154,8 +133,6 @@ def _parse_hyperliquid_funding_rates(raw_rates: List, hyperliquid_client: Hyperl
             rate=rate,
             apy=apy,
             next_funding_time_ms=next_funding_time_ms,
-            max_leverage=max_leverage,
-            is_tradable=is_tradable,
         )
     return parsed
 
@@ -194,8 +171,6 @@ def fetch_and_compare_funding_rates(
             if 0 < time_diff_ms <= minutes_to_ms:
                 funding_is_imminent_s1 = True
 
-        is_actionable = aster_rate.is_tradable and hyperliquid_rate.is_tradable
-
         comparisons.append(FundingComparison(
             symbol=symbol,
             long_venue="Aster",
@@ -203,9 +178,9 @@ def fetch_and_compare_funding_rates(
             apy_difference=aster_rate.apy - hyperliquid_rate.apy,
             funding_is_imminent=funding_is_imminent_s1,
             next_funding_time_ms=next_funding_time_s1,
-            long_max_leverage=aster_rate.max_leverage,
-            short_max_leverage=hyperliquid_rate.max_leverage,
-            is_actionable=is_actionable,
+            long_max_leverage=None,
+            short_max_leverage=None,
+            is_actionable=False,
         ))
 
         # Scenario 2: Long Hyperliquid, Short Aster
@@ -223,21 +198,54 @@ def fetch_and_compare_funding_rates(
             apy_difference=hyperliquid_rate.apy - aster_rate.apy,
             funding_is_imminent=funding_is_imminent_s2,
             next_funding_time_ms=next_funding_time_s2,
-            long_max_leverage=hyperliquid_rate.max_leverage,
-            short_max_leverage=aster_rate.max_leverage,
-            is_actionable=is_actionable,
+            long_max_leverage=None,
+            short_max_leverage=None,
+            is_actionable=False,
         ))
 
     # Sort by the highest APY difference
     sorted_comparisons = sorted(comparisons, key=lambda x: x.apy_difference, reverse=True)
 
-    top_4_comparisons = sorted_comparisons[:4]
+    top_opportunities = sorted_comparisons[:4]
+
+    # Enrich the top opportunities with market data
+    enriched_opportunities = []
+    for comp in top_opportunities:
+        symbol_base = comp.symbol
+        symbol_hl = f"{symbol_base}/USDC:USDC"
+        symbol_aster = f"{symbol_base}USDT"
+
+        try:
+            if comp.long_venue == "Aster":
+                long_leverage = aster_client.get_max_leverage(symbol_aster)
+                short_leverage = hyperliquid_client.get_max_leverage(symbol_hl)
+            else:  # long venue is Hyperliquid
+                long_leverage = hyperliquid_client.get_max_leverage(symbol_hl)
+                short_leverage = aster_client.get_max_leverage(symbol_aster)
+            is_actionable = True
+        except Exception as e:
+            logger.warning(f"Could not get market data for {symbol_base}, marking as not actionable: {e}")
+            long_leverage = None
+            short_leverage = None
+            is_actionable = False
+
+        enriched_opportunities.append(FundingComparison(
+            symbol=comp.symbol,
+            long_venue=comp.long_venue,
+            short_venue=comp.short_venue,
+            apy_difference=comp.apy_difference,
+            funding_is_imminent=comp.funding_is_imminent,
+            next_funding_time_ms=comp.next_funding_time_ms,
+            long_max_leverage=long_leverage,
+            short_max_leverage=short_leverage,
+            is_actionable=is_actionable,
+        ))
 
     print("\n--- Top 4 Funding Rate Arbitrage Opportunities ---")
-    if not top_4_comparisons:
+    if not enriched_opportunities:
         print("No opportunities found.")
     else:
-        for comp in top_4_comparisons:
+        for comp in enriched_opportunities:
             print(comp)
 
-    return top_4_comparisons
+    return enriched_opportunities
