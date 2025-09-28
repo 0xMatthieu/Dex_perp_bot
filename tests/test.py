@@ -183,7 +183,7 @@ def run_forced_strategy_test(aster_client: AsterClient, hyperliquid_client: Hype
     try:
         leverage = 4
         # Use a small, fixed amount of capital for the test to avoid draining balance
-        capital_to_deploy = Decimal("15.0")  # Must be > $10
+        capital_to_deploy = Decimal("50.0")  # Must be > $10
 
         logger.info(f"Forcing execution with ${capital_to_deploy} capital.")
 
