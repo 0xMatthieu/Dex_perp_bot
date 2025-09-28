@@ -27,7 +27,14 @@ logger = logging.getLogger(__name__)
 
 def main() -> int:
     """Load configuration, initialize clients, and run the delta-neutral strategy."""
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler("bot.log"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
 
     try:
         settings = Settings.from_env()
