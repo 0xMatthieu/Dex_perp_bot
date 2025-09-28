@@ -34,6 +34,12 @@ class HyperliquidClient:
                 "walletAddress": credentials.wallet_address,
             }
         )
+        try:
+            logger.info("Loading markets for Hyperliquid...")
+            self._client.load_markets()
+            logger.info("Hyperliquid markets loaded.")
+        except Exception as exc:
+            raise DexAPIError("Failed to load Hyperliquid markets") from exc
 
     def get_wallet_balance(self) -> WalletBalance:
         """Return the wallet balance reported by Hyperliquid."""
