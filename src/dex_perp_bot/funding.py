@@ -78,8 +78,8 @@ def _parse_aster_funding_rates(raw_rates: List[Dict]) -> Dict[str, FundingRate]:
         # Normalize symbol from BTCUSDT -> BTC
         normalized_symbol = symbol.replace("USDT", "").replace("USD", "")
         rate = Decimal(rate_str)
-        # Aster funding is typically every 8 hours (3 times a day)
-        apy = _calculate_apy(rate, periods_per_day=3)
+        # Aster funding is every 4 hours (6 times a day)
+        apy = _calculate_apy(rate, periods_per_day=6)
         parsed[normalized_symbol] = FundingRate(
             symbol=normalized_symbol, rate=rate, apy=apy, next_funding_time_ms=next_funding_time_ms
         )
@@ -106,16 +106,18 @@ def _parse_hyperliquid_funding_rates(raw_rates: List) -> Dict[str, FundingRate]:
             continue
 
         rate_str = hl_rate_info.get("fundingRate")
-        funding_time_ms_raw = hl_rate_info.get("nextFundingTime")
-        funding_time_ms = int(funding_time_ms_raw) if funding_time_ms_raw is not None else None
         if not rate_str:
             continue
 
         rate = Decimal(rate_str)
-        # Hyperliquid funding is hourly (24 times a day)
+        # Hyperliquid funding is hourly. We calculate the next one manually to be safe.
+        now = datetime.now(timezone.utc)
+        next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        next_funding_time_ms = int(next_hour.timestamp() * 1000)
+
         apy = _calculate_apy(rate, periods_per_day=24)
         parsed[symbol] = FundingRate(
-            symbol=symbol, rate=rate, apy=apy, next_funding_time_ms=funding_time_ms
+            symbol=symbol, rate=rate, apy=apy, next_funding_time_ms=next_funding_time_ms
         )
     return parsed
 
@@ -123,7 +125,7 @@ def _parse_hyperliquid_funding_rates(raw_rates: List) -> Dict[str, FundingRate]:
 def fetch_and_compare_funding_rates(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
-    imminent_funding_minutes: int = 10,
+    imminent_funding_minutes: int = 5,
 ) -> List[FundingComparison]:
     """
     Fetches funding rates from Aster and Hyperliquid, compares them,
