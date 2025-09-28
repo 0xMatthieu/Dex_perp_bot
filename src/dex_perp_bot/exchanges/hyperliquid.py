@@ -95,6 +95,18 @@ class HyperliquidClient:
         except Exception as exc:
             raise DexAPIError(f"Failed to fetch price for {symbol}") from exc
 
+    def get_max_leverage(self, symbol: str) -> int:
+        """Fetch the maximum leverage for a symbol."""
+        try:
+            # load_markets is implicitly called by market() if needed
+            market_info = self._client.market(symbol)
+            max_leverage = market_info.get("limits", {}).get("leverage", {}).get("max")
+            if max_leverage is None:
+                raise DexAPIError(f"Max leverage not found for {symbol}")
+            return int(max_leverage)
+        except Exception as exc:
+            raise DexAPIError(f"Failed to fetch max leverage for {symbol} on Hyperliquid") from exc
+
     def set_leverage(self, symbol: str, leverage: int) -> None:
         """Set leverage for a given symbol."""
         logger.info("Setting leverage for %s to %sx", symbol, leverage)

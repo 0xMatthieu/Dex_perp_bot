@@ -158,7 +158,24 @@ def run_arbitrage_strategy(
 
     logger.info(f"Identified best opportunity: {best_opp}")
 
-    # 2. Check if the current portfolio already matches the best opportunity.
+    # 2. Determine effective leverage based on exchange limits.
+    symbol_base = best_opp.symbol
+    symbol_hl = f"{symbol_base}/USDC:USDC"
+    symbol_aster = f"{symbol_base}USDT"
+
+    try:
+        max_leverage_hl = hyperliquid_client.get_max_leverage(symbol_hl)
+        max_leverage_aster = aster_client.get_max_leverage(symbol_aster)
+        effective_leverage = min(leverage, max_leverage_hl, max_leverage_aster)
+        logger.info(
+            f"Max leverage for {symbol_base}: Hyperliquid={max_leverage_hl}x, Aster={max_leverage_aster}x. "
+            f"Effective leverage set to {effective_leverage}x."
+        )
+    except Exception as exc:
+        logger.error("Could not determine max leverage, skipping trade. Error: %s", exc)
+        return
+
+    # 3. Check if the current portfolio already matches the best opportunity.
     hl_positions = hyperliquid_client.get_all_positions()
     aster_positions = aster_client.get_all_positions()
 
@@ -166,13 +183,13 @@ def run_arbitrage_strategy(
         logger.info("Already in optimal position for imminent funding. Holding position.")
         return
 
-    # 3. If not in the optimal position, rebalance.
+    # 4. If not in the optimal position, rebalance.
     logger.info("Portfolio does not match optimal strategy. Rebalancing.")
     cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client)
 
-    # 4. Calculate the new trade and execute it.
+    # 5. Calculate the new trade and execute it.
     decision = _calculate_trade_decision(
-        aster_client, hyperliquid_client, best_opp, leverage, capital_usd
+        aster_client, hyperliquid_client, best_opp, effective_leverage, capital_usd
     )
 
     if decision:

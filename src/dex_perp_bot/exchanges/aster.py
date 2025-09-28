@@ -121,6 +121,32 @@ class AsterClient:
         except requests.RequestException as exc:  # pragma: no cover - network failure
             raise DexAPIError(f"Aster funding rate request to {endpoint} failed") from exc
 
+    def get_max_leverage(self, symbol: str) -> int:
+        """Fetch maximum leverage for a symbol from leverage brackets."""
+        logger.debug("Fetching leverage brackets for %s", symbol)
+        try:
+            # This is a standard endpoint on Binance-like exchanges.
+            # It's a list containing one dict for the symbol.
+            brackets_info_list = self._get_signed("/fapi/v1/leverageBracket", params=[("symbol", symbol)])
+            if not isinstance(brackets_info_list, list) or not brackets_info_list:
+                raise DexAPIError("Invalid response from leverageBracket endpoint")
+
+            brackets_info = brackets_info_list[0]
+            # Find the bracket with the highest leverage.
+            max_leverage = 0
+            if isinstance(brackets_info, dict) and "brackets" in brackets_info:
+                for b in brackets_info["brackets"]:
+                    if b.get("initialLeverage", 0) > max_leverage:
+                        max_leverage = b["initialLeverage"]
+
+            if max_leverage == 0:
+                logger.warning("Could not parse max leverage for %s, falling back to 50x", symbol)
+                return 50
+            return int(max_leverage)
+        except DexAPIError as exc:
+            logger.warning("Failed to fetch leverage brackets for %s from Aster, falling back to 50x. Error: %s", symbol, exc)
+            return 50  # Fallback
+
     def get_price(self, symbol: str) -> Decimal:
         """Fetch the latest mark price for a symbol."""
         logger.debug("Fetching ticker price for %s", symbol)
