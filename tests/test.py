@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, TYPE_CHECKING
+from decimal import Decimal
+from typing import Any, Dict, List, TYPE_CHECKING
 
 from src.dex_perp_bot.exchanges.base import DexClientError
-from src.dex_perp_bot.funding import fetch_and_compare_funding_rates
+from src.dex_perp_bot.funding import FundingComparison
+import src.dex_perp_bot.strategy as strategy_module
 
 if TYPE_CHECKING:
     from src.dex_perp_bot.exchanges.aster import AsterClient
@@ -149,6 +151,58 @@ def run_order_tests(aster_client: AsterClient, hyperliquid_client: HyperliquidCl
     return summary
 
 
+def run_forced_strategy_test(aster_client: AsterClient, hyperliquid_client: HyperliquidClient) -> Dict[str, Any]:
+    """
+    Runs the arbitrage strategy by forcing a fake "imminent" opportunity
+    to ensure the execution logic is triggered, then cleans up.
+    """
+    summary: Dict[str, Any] = {}
+    logger.info("\n--- Running Forced Arbitrage Execution Test ---")
+
+    # 1. Create a fake opportunity that is imminent and profitable
+    fake_opportunity = FundingComparison(
+        symbol='BTC',
+        long_venue='Aster',
+        short_venue='Hyperliquid',
+        apy_difference=Decimal("100"),
+        funding_is_imminent=True,
+        next_funding_time_ms=int(time.time() * 1000) + 60000,
+    )
+
+    # 2. Mock the funding fetcher to return our fake opportunity
+    def fake_fetch(*args, **kwargs) -> List[FundingComparison]:
+        logger.info("--- Using MOCKED funding data for test ---")
+        return [fake_opportunity]
+
+    original_fetch = strategy_module.fetch_and_compare_funding_rates
+    strategy_module.fetch_and_compare_funding_rates = fake_fetch
+
+    try:
+        leverage = 4
+        # Use a small, fixed amount of capital for the test to avoid draining balance
+        capital_to_deploy = Decimal("15.0")  # Must be > $10
+
+        logger.info(f"Forcing execution with ${capital_to_deploy} capital.")
+
+        strategy_module.run_arbitrage_strategy(
+            aster_client, hyperliquid_client, leverage=leverage, capital_usd=capital_to_deploy
+        )
+        summary["status"] = "EXECUTED"
+
+    except DexClientError as exc:
+        logger.exception("Forced arbitrage execution test failed during run.")
+        summary["error"] = str(exc)
+    finally:
+        logger.info("--- Running cleanup after forced arbitrage test ---")
+        strategy_module.cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client)
+        # Restore the original function
+        strategy_module.fetch_and_compare_funding_rates = original_fetch
+
+    print("\n--- Forced Arbitrage Execution Test Results ---")
+    print(json.dumps(summary, indent=2))
+    return summary
+
+
 if __name__ == "__main__":
     import sys
     from pathlib import Path
@@ -181,4 +235,5 @@ if __name__ == "__main__":
         logger.error("Failed to sync time with Aster: %s", exc)
         # It's not critical for funding tests, but good to know.
 
-    run_funding_test(aster_client, hyperliquid_client)
+    # run_funding_test(aster_client, hyperliquid_client)
+    run_forced_strategy_test(aster_client, hyperliquid_client)
