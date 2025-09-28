@@ -142,35 +142,22 @@ def run_arbitrage_strategy(
     # 1. Find all imminent funding opportunities that meet the APY threshold.
     opportunities = fetch_and_compare_funding_rates(aster_client, hyperliquid_client)
     imminent_opportunities = [
-        opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > min_apy_diff_pct
+        opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > min_apy_diff_pct and opp.is_actionable
     ]
 
     if not imminent_opportunities:
-        logger.info("No imminent funding opportunities meeting APY threshold found. Holding existing positions.")
+        logger.info("No actionable imminent funding opportunities found. Holding existing positions.")
         return
 
-    best_opp = imminent_opportunities[0]  # Already sorted by APY difference
-    logger.info(f"Identified best opportunity: {best_opp}")
+    best_opp = imminent_opportunities[0]  # Already sorted and filtered
 
-    # 2. For the best opportunity, fetch market data to confirm it's actionable.
-    symbol_base = best_opp.symbol
-    symbol_hl = f"{symbol_base}/USDC:USDC"
-    symbol_aster = f"{symbol_base}USDT"
-    effective_leverage = 0
-
-    try:
-        max_leverage_hl = hyperliquid_client.get_max_leverage(symbol_hl)
-        max_leverage_aster = aster_client.get_max_leverage(symbol_aster)
-        effective_leverage = min(leverage, max_leverage_hl, max_leverage_aster)
-        logger.info(
-            f"Opportunity for {symbol_base} is viable. "
-            f"Max leverage: Hyperliquid={max_leverage_hl}x, Aster={max_leverage_aster}x. "
-            f"Effective leverage set to {effective_leverage}x."
-        )
-    except Exception as exc:
-        logger.error(f"Best opportunity for {symbol_base} is not actionable. Error: {exc}")
-        logger.info("Holding existing positions.")
-        return
+    # 2. Determine effective leverage based on pre-fetched exchange limits.
+    # The 'or 1' is a safeguard in case max leverage is None, though it shouldn't be for actionable opps.
+    effective_leverage = min(
+        leverage, best_opp.long_max_leverage or 1, best_opp.short_max_leverage or 1
+    )
+    logger.info(f"Selected best actionable opportunity: {best_opp}")
+    logger.info(f"Effective leverage set to {effective_leverage}x.")
 
     # 3. Check if the current portfolio already matches the best opportunity.
     hl_positions = hyperliquid_client.get_all_positions()
