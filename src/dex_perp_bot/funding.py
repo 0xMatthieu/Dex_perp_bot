@@ -123,7 +123,7 @@ def _parse_hyperliquid_funding_rates(raw_rates: List) -> Dict[str, FundingRate]:
 def fetch_and_compare_funding_rates(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
-    imminent_funding_minutes: int = 5,
+    imminent_funding_minutes: int = 10,
 ) -> List[FundingComparison]:
     """
     Fetches funding rates from Aster and Hyperliquid, compares them,
