@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, TYPE_CHECKING
 
 from src.dex_perp_bot.exchanges.base import DexClientError
-from src.dex_perp_bot.funding import FundingComparison
+from src.dex_perp_bot.funding import FundingComparison, fetch_and_compare_funding_rates
 import src.dex_perp_bot.strategy as strategy_module
 
 if TYPE_CHECKING:
