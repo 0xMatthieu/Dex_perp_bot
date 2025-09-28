@@ -6,6 +6,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from datetime import datetime
 
 # Add project root to path to allow importing from `tests`
 project_root = Path(__file__).resolve().parent.parent.parent
@@ -27,11 +28,12 @@ logger = logging.getLogger(__name__)
 
 def main() -> int:
     """Load configuration, initialize clients, and run the delta-neutral strategy."""
+    log_filename = f"bot_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler("bot.log"),
+            logging.FileHandler(log_filename),
             logging.StreamHandler(sys.stdout),
         ],
     )
