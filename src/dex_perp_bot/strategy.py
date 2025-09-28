@@ -6,10 +6,11 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from .funding import FundingComparison, fetch_and_compare_funding_rates
+from .exchanges.aster import AsterClient
+from .exchanges.hyperliquid import HyperliquidClient
 
 if TYPE_CHECKING:
-    from .exchanges.aster import AsterClient
-    from .exchanges.hyperliquid import HyperliquidClient
+    pass
 
 logger = logging.getLogger(__name__)
 
