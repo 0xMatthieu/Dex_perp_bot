@@ -59,6 +59,9 @@ def main() -> int:
     try:
         while True:
             try:
+                logger.info(
+                    f"---------------------------------------------- "
+                )
                 leverage = 4
                 # Use 100% of the available capital. To be more conservative, set this below 1.0.
                 capital_allocation_pct = Decimal("0.25")
