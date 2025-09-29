@@ -87,7 +87,11 @@ def main() -> int:
                 else:
                     # Run the arbitrage strategy, which will handle rebalancing internally.
                     run_arbitrage_strategy(
-                        aster_client, hyperliquid_client, leverage=leverage, capital_usd=capital_to_deploy
+                        aster_client,
+                        hyperliquid_client,
+                        leverage=leverage,
+                        capital_usd=capital_to_deploy,
+                        imminent_funding_minutes=LOOP_INTERVAL_MINUTES,
                     )
 
             except DexClientError as exc:

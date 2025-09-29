@@ -136,13 +136,16 @@ def run_arbitrage_strategy(
     leverage: int,
     capital_usd: Decimal,
     min_apy_diff_pct: Decimal = Decimal("0"),
+    imminent_funding_minutes: int = 5,
 ) -> None:
     """
     Main strategy function to find and act on imminent funding rate opportunities.
     It will rebalance the portfolio to match the best opportunity if not already aligned.
     """
     # 1. Find all actionable funding opportunities that meet the APY threshold.
-    opportunities = fetch_and_compare_funding_rates(aster_client, hyperliquid_client)
+    opportunities = fetch_and_compare_funding_rates(
+        aster_client, hyperliquid_client, imminent_funding_minutes=imminent_funding_minutes
+    )
     actionable_opportunities = [
         opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > min_apy_diff_pct and opp.is_actionable
     ]
