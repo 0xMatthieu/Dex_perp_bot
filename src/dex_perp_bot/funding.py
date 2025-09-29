@@ -30,6 +30,7 @@ class FundingComparison:
     long_venue: str
     short_venue: str
     apy_difference: Decimal
+    apy_difference_basis: str  # "1h" or "4h"
     apy_aster_1h: Decimal
     apy_aster_4h: Decimal
     apy_hyperliquid_1h: Decimal
@@ -52,7 +53,7 @@ class FundingComparison:
         )
         return (
             f"Long {self.symbol} on {self.long_venue}, Short on {self.short_venue}: "
-            f"APY Difference (1h basis) = {self.apy_difference:.4f}%{imminent_str}{actionable_str} | {leverage_str} | {details_str}"
+            f"APY Difference ({self.apy_difference_basis} basis) = {self.apy_difference:.4f}%{imminent_str}{actionable_str} | {leverage_str} | {details_str}"
         )
 
 
@@ -207,12 +208,24 @@ def fetch_and_compare_funding_rates(
 
         is_imminent = aster_funding_imminent or hl_funding_imminent
 
+        # If Aster's funding is imminent, its 4-hour rate is the primary driver for an
+        # opportunity. We should compare on that basis. Otherwise, use 1-hour.
+        if aster_funding_imminent:
+            apy_aster_basis = aster_rate.apy_4h
+            apy_hl_basis = hyperliquid_rate.apy_4h
+            apy_basis = "4h"
+        else:
+            apy_aster_basis = aster_rate.apy_1h
+            apy_hl_basis = hyperliquid_rate.apy_1h
+            apy_basis = "1h"
+
         # Scenario 1: Long Aster, Short Hyperliquid
         comparisons.append(FundingComparison(
             symbol=symbol,
             long_venue="Aster",
             short_venue="Hyperliquid",
-            apy_difference=aster_rate.apy_1h - hyperliquid_rate.apy_1h,
+            apy_difference=apy_aster_basis - apy_hl_basis,
+            apy_difference_basis=apy_basis,
             apy_aster_1h=aster_rate.apy_1h,
             apy_aster_4h=aster_rate.apy_4h,
             apy_hyperliquid_1h=hyperliquid_rate.apy_1h,
@@ -231,7 +244,8 @@ def fetch_and_compare_funding_rates(
             symbol=symbol,
             long_venue="Hyperliquid",
             short_venue="Aster",
-            apy_difference=hyperliquid_rate.apy_1h - aster_rate.apy_1h,
+            apy_difference=apy_hl_basis - apy_aster_basis,
+            apy_difference_basis=apy_basis,
             apy_aster_1h=aster_rate.apy_1h,
             apy_aster_4h=aster_rate.apy_4h,
             apy_hyperliquid_1h=hyperliquid_rate.apy_1h,
@@ -276,6 +290,7 @@ def fetch_and_compare_funding_rates(
             long_venue=comp.long_venue,
             short_venue=comp.short_venue,
             apy_difference=comp.apy_difference,
+            apy_difference_basis=comp.apy_difference_basis,
             apy_aster_1h=comp.apy_aster_1h,
             apy_aster_4h=comp.apy_aster_4h,
             apy_hyperliquid_1h=comp.apy_hyperliquid_1h,
