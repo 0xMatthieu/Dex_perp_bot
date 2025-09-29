@@ -18,7 +18,8 @@ class FundingRate:
     """Standardized funding rate information."""
     symbol: str
     rate: Decimal
-    apy: Decimal
+    apy_1h: Decimal
+    apy_4h: Decimal
     next_funding_time_ms: Optional[int]
 
 
@@ -29,8 +30,10 @@ class FundingComparison:
     long_venue: str
     short_venue: str
     apy_difference: Decimal
-    apy_aster: Decimal
-    apy_hyperliquid: Decimal
+    apy_aster_1h: Decimal
+    apy_aster_4h: Decimal
+    apy_hyperliquid_1h: Decimal
+    apy_hyperliquid_4h: Decimal
     rate_aster: Decimal
     rate_hyperliquid: Decimal
     funding_is_imminent: bool
@@ -44,12 +47,12 @@ class FundingComparison:
         actionable_str = "" if self.is_actionable else " (NOT ACTIONABLE)"
         leverage_str = f"Lvg: {self.long_max_leverage or 'N/A'}x/{self.short_max_leverage or 'N/A'}x"
         details_str = (
-            f"Aster APY: {self.apy_aster:.4f}% (Rate: {self.rate_aster:.8f}) | "
-            f"HL APY: {self.apy_hyperliquid:.4f}% (Rate: {self.rate_hyperliquid:.8f})"
+            f"Aster APY (1h/4h): {self.apy_aster_1h:.4f}%/{self.apy_aster_4h:.4f}% (Rate: {self.rate_aster:.8f}) | "
+            f"HL APY (1h/4h): {self.apy_hyperliquid_1h:.4f}%/{self.apy_hyperliquid_4h:.4f}% (Rate: {self.rate_hyperliquid:.8f})"
         )
         return (
             f"Long {self.symbol} on {self.long_venue}, Short on {self.short_venue}: "
-            f"APY Difference = {self.apy_difference:.4f}%{imminent_str}{actionable_str} | {leverage_str} | {details_str}"
+            f"APY Difference (1h basis) = {self.apy_difference:.4f}%{imminent_str}{actionable_str} | {leverage_str} | {details_str}"
         )
 
 
@@ -95,12 +98,14 @@ def _parse_aster_funding_rates(raw_rates: List[Dict], aster_client: AsterClient)
         normalized_symbol = symbol.replace("USDT", "").replace("USD", "")
         rate = Decimal(rate_str)
         # Aster funding is every 4 hours (6 times a day)
-        apy = _calculate_apy(rate, periods_per_day=6)
+        apy_4h = _calculate_apy(rate, periods_per_day=6)
+        apy_1h = apy_4h / 4
 
         parsed[normalized_symbol] = FundingRate(
             symbol=normalized_symbol,
             rate=rate,
-            apy=apy,
+            apy_1h=apy_1h,
+            apy_4h=apy_4h,
             next_funding_time_ms=next_funding_time_ms,
         )
     return parsed
@@ -135,11 +140,13 @@ def _parse_hyperliquid_funding_rates(raw_rates: List, hyperliquid_client: Hyperl
         next_hour = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
         next_funding_time_ms = int(next_hour.timestamp() * 1000)
 
-        apy = _calculate_apy(rate, periods_per_day=24)
+        apy_1h = _calculate_apy(rate, periods_per_day=24)
+        apy_4h = apy_1h * 4
         parsed[symbol] = FundingRate(
             symbol=symbol,
             rate=rate,
-            apy=apy,
+            apy_1h=apy_1h,
+            apy_4h=apy_4h,
             next_funding_time_ms=next_funding_time_ms,
         )
     return parsed
@@ -205,9 +212,11 @@ def fetch_and_compare_funding_rates(
             symbol=symbol,
             long_venue="Aster",
             short_venue="Hyperliquid",
-            apy_difference=aster_rate.apy - hyperliquid_rate.apy,
-            apy_aster=aster_rate.apy,
-            apy_hyperliquid=hyperliquid_rate.apy,
+            apy_difference=aster_rate.apy_1h - hyperliquid_rate.apy_1h,
+            apy_aster_1h=aster_rate.apy_1h,
+            apy_aster_4h=aster_rate.apy_4h,
+            apy_hyperliquid_1h=hyperliquid_rate.apy_1h,
+            apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
             rate_aster=aster_rate.rate,
             rate_hyperliquid=hyperliquid_rate.rate,
             funding_is_imminent=is_imminent,
@@ -222,9 +231,11 @@ def fetch_and_compare_funding_rates(
             symbol=symbol,
             long_venue="Hyperliquid",
             short_venue="Aster",
-            apy_difference=hyperliquid_rate.apy - aster_rate.apy,
-            apy_aster=aster_rate.apy,
-            apy_hyperliquid=hyperliquid_rate.apy,
+            apy_difference=hyperliquid_rate.apy_1h - aster_rate.apy_1h,
+            apy_aster_1h=aster_rate.apy_1h,
+            apy_aster_4h=aster_rate.apy_4h,
+            apy_hyperliquid_1h=hyperliquid_rate.apy_1h,
+            apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
             rate_aster=aster_rate.rate,
             rate_hyperliquid=hyperliquid_rate.rate,
             funding_is_imminent=is_imminent,
@@ -265,8 +276,10 @@ def fetch_and_compare_funding_rates(
             long_venue=comp.long_venue,
             short_venue=comp.short_venue,
             apy_difference=comp.apy_difference,
-            apy_aster=comp.apy_aster,
-            apy_hyperliquid=comp.apy_hyperliquid,
+            apy_aster_1h=comp.apy_aster_1h,
+            apy_aster_4h=comp.apy_aster_4h,
+            apy_hyperliquid_1h=comp.apy_hyperliquid_1h,
+            apy_hyperliquid_4h=comp.apy_hyperliquid_4h,
             rate_aster=comp.rate_aster,
             rate_hyperliquid=comp.rate_hyperliquid,
             funding_is_imminent=comp.funding_is_imminent,
