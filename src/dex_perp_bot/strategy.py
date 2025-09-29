@@ -144,7 +144,7 @@ def run_arbitrage_strategy(
     # 1. Find all actionable funding opportunities that meet the APY threshold.
     opportunities = fetch_and_compare_funding_rates(aster_client, hyperliquid_client)
     actionable_opportunities = [
-        opp for opp in opportunities if opp.apy_difference > min_apy_diff_pct and opp.is_actionable
+        opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > min_apy_diff_pct and opp.is_actionable
     ]
 
     if not actionable_opportunities:

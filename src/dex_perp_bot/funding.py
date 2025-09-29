@@ -50,7 +50,7 @@ def _get_next_aster_funding_time_ms() -> int:
     Calculates the next funding time for Aster, assuming funding at 00, 08, 16 UTC.
     """
     now = datetime.now(timezone.utc)
-    funding_hours = [0, 4, 10, 12, 16, 20]
+    funding_hours = [0, 4, 8, 12, 16, 20]
 
     next_funding_dt = None
     for hour in funding_hours:
