@@ -177,41 +177,42 @@ def fetch_and_compare_funding_rates(
         aster_rate = aster_rates[symbol]
         hyperliquid_rate = hyperliquid_rates[symbol]
 
-        # Scenario 1: Long Aster, Short Hyperliquid
-        funding_is_imminent_s1 = False
-        next_funding_time_s1 = aster_rate.next_funding_time_ms
-        if next_funding_time_s1:
-            time_diff_ms = next_funding_time_s1 - current_time_ms
+        # Check for imminent funding on either exchange.
+        aster_funding_imminent = False
+        if aster_rate.next_funding_time_ms:
+            time_diff_ms = aster_rate.next_funding_time_ms - current_time_ms
             if 0 < time_diff_ms <= minutes_to_ms:
-                funding_is_imminent_s1 = True
+                aster_funding_imminent = True
 
+        hl_funding_imminent = False
+        if hyperliquid_rate.next_funding_time_ms:
+            time_diff_ms = hyperliquid_rate.next_funding_time_ms - current_time_ms
+            if 0 < time_diff_ms <= minutes_to_ms:
+                hl_funding_imminent = True
+
+        is_imminent = aster_funding_imminent or hl_funding_imminent
+
+        # Scenario 1: Long Aster, Short Hyperliquid
         comparisons.append(FundingComparison(
             symbol=symbol,
             long_venue="Aster",
             short_venue="Hyperliquid",
             apy_difference=aster_rate.apy - hyperliquid_rate.apy,
-            funding_is_imminent=funding_is_imminent_s1,
-            next_funding_time_ms=next_funding_time_s1,
+            funding_is_imminent=is_imminent,
+            next_funding_time_ms=aster_rate.next_funding_time_ms,
             long_max_leverage=None,
             short_max_leverage=None,
             is_actionable=False,
         ))
 
         # Scenario 2: Long Hyperliquid, Short Aster
-        funding_is_imminent_s2 = False
-        next_funding_time_s2 = hyperliquid_rate.next_funding_time_ms
-        if next_funding_time_s2:
-            time_diff_ms = next_funding_time_s2 - current_time_ms
-            if 0 < time_diff_ms <= minutes_to_ms:
-                funding_is_imminent_s2 = True
-
         comparisons.append(FundingComparison(
             symbol=symbol,
             long_venue="Hyperliquid",
             short_venue="Aster",
             apy_difference=hyperliquid_rate.apy - aster_rate.apy,
-            funding_is_imminent=funding_is_imminent_s2,
-            next_funding_time_ms=next_funding_time_s2,
+            funding_is_imminent=is_imminent,
+            next_funding_time_ms=hyperliquid_rate.next_funding_time_ms,
             long_max_leverage=None,
             short_max_leverage=None,
             is_actionable=False,
