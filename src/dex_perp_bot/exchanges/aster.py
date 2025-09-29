@@ -197,6 +197,8 @@ class AsterClient:
             "tick_size": Decimal(price_filter["tickSize"]),
             "step_size": Decimal(lot_size_filter["stepSize"]),
             "min_notional": Decimal(min_notional_filter["notional"]),
+            "limit_min_quantity": Decimal(lot_size_filter["minQty"]),
+            "market_min_quantity": Decimal(market_lot_size_filter["minQty"]),
             "limit_max_quantity": Decimal(lot_size_filter["maxQty"]),
             "market_max_quantity": Decimal(market_lot_size_filter["maxQty"]),
         }
@@ -304,6 +306,51 @@ class AsterClient:
         logger.info("Placing order with payload: %s", dict(order_payload))
         return self._post_signed("/fapi/v1/order", body=order_payload)
 
+    def _place_single_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: Decimal,
+        current_price: Decimal,
+        tick_size: Decimal,
+        step_size: Decimal,
+    ) -> Dict[str, Any]:
+        """Helper to place a single order on Aster."""
+        client_order_id = f"dxp-{uuid.uuid4().hex}"
+        order_payload: List[Tuple[str, Any]] = [
+            ("symbol", symbol),
+            ("side", side.upper()),
+            ("type", order_type.upper()),
+            ("newClientOrderId", client_order_id),
+        ]
+
+        # Format quantity according to stepSize precision
+        qty_precision = -step_size.normalize().as_tuple().exponent
+        qty_str = f"{quantity:.{qty_precision}f}"
+        order_payload.append(("quantity", qty_str))
+
+        if order_type.upper() == "LIMIT":
+            # For testing cancellation, place the order far from the current price
+            # to ensure it is not filled immediately.
+            if side.upper() == "BUY":
+                limit_price = current_price * Decimal("0.8")
+            else:
+                limit_price = current_price * Decimal("1.2")
+            rounded_price = round(limit_price / tick_size) * tick_size
+            price_precision = -tick_size.normalize().as_tuple().exponent
+            price_str = f"{rounded_price:.{price_precision}f}"
+            order_payload.extend([
+                ("price", price_str),
+                ("timeInForce", "GTC"),
+            ])
+
+        logger.info("Placing order with payload: %s", dict(order_payload))
+        order_response = self._post_signed("/fapi/v1/order", body=order_payload)
+
+        print("Final order payload:", dict(order_payload))
+        return order_response
+
     def _get_public(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """Generic public GET request helper."""
         url = f"{self._config.base_url.rstrip('/')}{endpoint}"
@@ -320,7 +367,7 @@ class AsterClient:
         order_type: str,
         leverage: int,
         margin_usd: float,
-    ) -> Dict[str, Any]:
+    ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
         """Create an order on Aster for BTCUSDT."""
         symbol = "BTCUSDT"
 
@@ -331,6 +378,7 @@ class AsterClient:
         step_size = filters["step_size"]
         min_notional = filters["min_notional"]
         max_quantity = filters["limit_max_quantity"] if order_type == "LIMIT" else filters["market_max_quantity"]
+        min_quantity = filters["limit_min_quantity"] if order_type == "LIMIT" else filters["market_min_quantity"]
 
         # 2. Query for current price
         logger.info("Fetching ticker price for %s", symbol)
@@ -363,11 +411,6 @@ class AsterClient:
                 f"Increase margin or leverage."
             )
 
-        if qty > max_quantity:
-            raise ValueError(
-                f"Calculated quantity {qty} exceeds the maximum allowed quantity {max_quantity} for a {order_type} order."
-            )
-
         # 5. Set leverage
         logger.info("Setting leverage for %s to %sx", symbol, leverage)
         self._post_signed(
@@ -376,41 +419,36 @@ class AsterClient:
             signature_location="query",
         )
 
-        # 6. Place order
-        client_order_id = f"dxp-{uuid.uuid4().hex}"
-        order_payload: List[Tuple[str, Any]] = [
-            ("symbol", symbol),
-            ("side", side.upper()),
-            ("type", order_type.upper()),
-            ("newClientOrderId", client_order_id),
-        ]
+        # 6. Place order(s)
+        if qty <= max_quantity:
+            # Place a single order
+            return self._place_single_order(symbol, side, order_type, qty, current_price, tick_size, step_size)
 
-        # Format quantity according to stepSize precision
-        qty_precision = -step_size.normalize().as_tuple().exponent
-        qty_str = f"{qty:.{qty_precision}f}"
-        order_payload.append(("quantity", qty_str))
+        # Split into chunks if qty > max_quantity
+        logger.info(f"Quantity {qty} exceeds max {max_quantity}, splitting into multiple orders.")
+        results = []
+        remaining_qty = qty
+        while remaining_qty > 0:
+            chunk_qty = min(remaining_qty, max_quantity)
+            # Round down to stepSize
+            chunk_qty = (chunk_qty // step_size) * step_size
 
-        if order_type.upper() == "LIMIT":
-            # For testing cancellation, place the order far from the current price
-            # to ensure it is not filled immediately.
-            if side.upper() == "BUY":
-                limit_price = current_price * Decimal("0.8")
-            else:
-                limit_price = current_price * Decimal("1.2")
-            rounded_price = round(limit_price / tick_size) * tick_size
-            price_precision = -tick_size.normalize().as_tuple().exponent
-            price_str = f"{rounded_price:.{price_precision}f}"
-            order_payload.extend([
-                ("price", price_str),
-                ("timeInForce", "GTC"),
-            ])
+            if chunk_qty < min_quantity:
+                logger.warning(f"Remaining quantity {remaining_qty} is less than min quantity {min_quantity}, stopping.")
+                break
 
-        logger.info("Placing order with payload: %s", dict(order_payload))
-        order_response = self._post_signed("/fapi/v1/order", body=order_payload)
+            try:
+                res = self._place_single_order(
+                    symbol, side, order_type, chunk_qty, current_price, tick_size, step_size
+                )
+                results.append(res)
+                remaining_qty -= chunk_qty
+                time.sleep(0.1)  # Small delay to avoid rate limiting issues
+            except DexAPIError as exc:
+                logger.error(f"Error placing chunk of size {chunk_qty}: {exc}. Stopping further chunks.")
+                break
 
-        # 8. The function should print the final order payload and return the JSON response.
-        print("Final order payload:", dict(order_payload))
-        return order_response
+        return results
 
     def get_all_open_orders(self) -> List[Dict[str, Any]]:
         """Query all open orders."""
