@@ -187,6 +187,7 @@ class AsterClient:
         filters = {f["filterType"]: f for f in symbol_info.get("filters", [])}
         price_filter = filters.get("PRICE_FILTER")
         lot_size_filter = filters.get("LOT_SIZE")
+        market_lot_size_filter = filters.get("MARKET_LOT_SIZE")
         min_notional_filter = filters.get("MIN_NOTIONAL")
 
         if not all([price_filter, lot_size_filter, min_notional_filter]):
@@ -196,6 +197,8 @@ class AsterClient:
             "tick_size": Decimal(price_filter["tickSize"]),
             "step_size": Decimal(lot_size_filter["stepSize"]),
             "min_notional": Decimal(min_notional_filter["notional"]),
+            "limit_max_quantity": Decimal(lot_size_filter["maxQty"]),
+            "market_max_quantity": Decimal(market_lot_size_filter["maxQty"]),
         }
 
     def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
@@ -327,6 +330,7 @@ class AsterClient:
         tick_size = filters["tick_size"]
         step_size = filters["step_size"]
         min_notional = filters["min_notional"]
+        max_quantity = filters["limit_max_quantity"] if order_type == "LIMIT" else filters["market_max_quantity"]
 
         # 2. Query for current price
         logger.info("Fetching ticker price for %s", symbol)
