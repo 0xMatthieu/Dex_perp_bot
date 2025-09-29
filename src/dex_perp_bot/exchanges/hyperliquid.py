@@ -254,7 +254,10 @@ class HyperliquidClient:
             raise DexAPIError(f"Failed to cancel Hyperliquid order {order_id}") from exc
 
     def close_position(self, symbol: str) -> Dict[str, Any]:
-        """Close an open position for a given symbol on Hyperliquid."""
+        """
+        Close an open position for a given symbol on Hyperliquid.
+        Tries a post-only limit order first, falling back to a market order.
+        """
         logger.info("Attempting to close position for %s", symbol)
 
         # 1. Fetch current position
@@ -276,25 +279,52 @@ class HyperliquidClient:
         close_side = "sell" if side == "long" else "buy"
         size_to_close = float(position_size)
 
-        # 2. Get current price for market order slippage calculation
-        logger.info("Fetching order book for %s to get price for closing order", symbol)
+        # 2. Get market info for precision
+        market_info = self._client.market(symbol)
+        tick_size = Decimal(str(market_info['precision']['price']))
+
+        # --- 3. Attempt Post-Only Limit Order ---
         try:
+            logger.info("Attempting to close with post-only limit order.")
             order_book = self._client.fetch_order_book(symbol)
             if not order_book.get("bids") or not order_book.get("asks"):
-                raise DexAPIError(f"Order book for {symbol} is empty, cannot determine price")
-            best_bid = order_book["bids"][0][0]
-            best_ask = order_book["asks"][0][0]
-            current_price = (Decimal(str(best_bid)) + Decimal(str(best_ask))) / 2
-        except Exception as exc:
-            raise DexAPIError(f"Failed to fetch price for {symbol}") from exc
+                raise DexAPIError(f"Order book for {symbol} is empty, cannot place limit order.")
 
-        # 3. Place a reduce-only market order to close the position
-        logger.info(
-            "Placing reduce-only MARKET %s order for %s of %s to close position",
-            close_side, size_to_close, symbol
-        )
-        try:
+            best_bid = Decimal(str(order_book["bids"][0][0]))
+            best_ask = Decimal(str(order_book["asks"][0][0]))
+
+            # Place one tick inside the passive side of the book
+            limit_price = (best_ask - tick_size) if close_side == "sell" else (best_bid + tick_size)
+
+            logger.info(f"Placing post-only LIMIT {close_side} order for {size_to_close} of {symbol} at {limit_price}")
             order_response = self._client.create_order(
+                symbol=symbol,
+                type="limit",
+                side=close_side.lower(),
+                amount=size_to_close,
+                price=float(limit_price),
+                params={"postOnly": True, "reduceOnly": True},
+            )
+            logger.info(f"Successfully placed post-only limit order for {symbol}.")
+            return order_response
+        except Exception as exc:
+            err_msg = str(exc).lower()
+            if "post-only" in err_msg or "would cross" in err_msg or "fill immediately" in err_msg:
+                logger.warning(
+                    f"Post-only order for {symbol} failed as it would cross the book. Falling back. Error: {exc}"
+                )
+            else:
+                logger.warning(f"Failed to place post-only order for {symbol}, falling back. Error: {exc}")
+
+        # --- 4. Fallback to Market Order ---
+        logger.info(f"Fallback: Closing {symbol} with a market order.")
+        try:
+            current_price = self.get_price(symbol)
+            logger.info(
+                "Placing reduce-only MARKET %s order for %s of %s to close position",
+                close_side, size_to_close, symbol
+            )
+            return self._client.create_order(
                 symbol=symbol,
                 type="market",
                 side=close_side.lower(),
@@ -303,7 +333,5 @@ class HyperliquidClient:
                 params={"reduceOnly": True},
             )
         except Exception as exc:
-            raise DexAPIError(f"Failed to place closing order for {symbol}") from exc
-
-        return order_response
+            raise DexAPIError(f"Failed to place fallback closing market order for {symbol}") from exc
 

@@ -153,6 +153,11 @@ class AsterClient:
         price_info = self._get_public("/fapi/v1/ticker/price", params={"symbol": symbol})
         return Decimal(price_info["price"])
 
+    def _get_order_book(self, symbol: str, limit: int = 5) -> Dict[str, Any]:
+        """Fetch order book for a symbol."""
+        logger.debug("Fetching order book for %s", symbol)
+        return self._get_public("/fapi/v1/depth", params={"symbol": symbol, "limit": limit})
+
     def get_symbol_filters(self, symbol: str) -> Dict[str, Decimal]:
         """Fetch and return price/lot/notional filters for a symbol."""
         logger.debug("Fetching exchange info for %s filters", symbol)
@@ -427,57 +432,90 @@ class AsterClient:
         return None
 
     def close_position(self, symbol: str) -> Dict[str, Any]:
-        """Close an open position for a given symbol on Aster."""
+        """
+        Close an open position for a given symbol on Aster.
+        Tries a post-only limit order first, falling back to a stop-market order.
+        """
         logger.info("Attempting to close position for %s", symbol)
 
-        # 1. Fetch current position to determine if there is a position to close.
         position = self.get_position(symbol)
         if position is None:
             raise DexAPIError(f"Could not find position information for {symbol}")
 
-        position_amt_str = position.get("positionAmt", "0")
         try:
-            position_amt = Decimal(position_amt_str)
+            position_amt = Decimal(position.get("positionAmt", "0"))
         except InvalidOperation:
-            raise DexAPIError(f"Invalid position amount '{position_amt_str}' for {symbol}")
+            raise DexAPIError(f"Invalid position amount '{position.get('positionAmt')}' for {symbol}")
 
         if position_amt.is_zero():
             logger.info("No open position found for %s", symbol)
             return {"status": "no_position"}
 
         close_side = "SELL" if position_amt > 0 else "BUY"
+        quantity_to_close = abs(position_amt)
 
-        # Fetch price info to set stopPrice
-        exchange_info = self._get_public("/fapi/v1/exchangeInfo")
-        symbol_info = next((s for s in exchange_info.get("symbols", []) if s["symbol"] == symbol), None)
-        if not symbol_info:
-            raise DexAPIError(f"Could not find symbol info for {symbol}")
-        filters = {f["filterType"]: f for f in symbol_info.get("filters", [])}
-        price_filter = filters.get("PRICE_FILTER")
-        if not price_filter:
-            raise DexAPIError(f"Missing PRICE_FILTER for {symbol}")
-        tick_size = Decimal(price_filter["tickSize"])
+        filters = self.get_symbol_filters(symbol)
+        tick_size = filters['tick_size']
+        step_size = filters['step_size']
 
-        price_info = self._get_public("/fapi/v1/ticker/price", params={"symbol": symbol})
-        current_price = Decimal(price_info["price"])
+        # --- 1. Attempt Post-Only Limit Order ---
+        try:
+            logger.info("Attempting to close with post-only limit order.")
+            order_book = self._get_order_book(symbol)
+            if not order_book.get("bids") or not order_book.get("asks"):
+                raise DexAPIError(f"Order book for {symbol} is empty, cannot place limit order.")
 
-        # To trigger the stop order immediately, set the stopPrice slightly
-        # through the current market price.
-        if close_side == "SELL":  # Closing a long position
-            stop_price = current_price * Decimal("0.9")  # 0.1% below
-        else:  # Closing a short position
-            stop_price = current_price * Decimal("1.1")  # 0.1% above
+            best_bid = Decimal(order_book["bids"][0][0])
+            best_ask = Decimal(order_book["asks"][0][0])
 
-        # Round to tick_size
-        stop_price = round(stop_price / tick_size) * tick_size
+            # Place one tick inside the passive side of the book
+            limit_price = (best_ask - tick_size) if close_side == "SELL" else (best_bid + tick_size)
+
+            price_precision = -tick_size.normalize().as_tuple().exponent
+            price_str = f"{limit_price:.{price_precision}f}"
+            qty_precision = -step_size.normalize().as_tuple().exponent
+            qty_str = f"{quantity_to_close:.{qty_precision}f}"
+
+            payload: List[Tuple[str, Any]] = [
+                ("symbol", symbol),
+                ("side", close_side),
+                ("type", "LIMIT"),
+                ("quantity", qty_str),
+                ("price", price_str),
+                ("timeInForce", "GTX"),  # Post-Only
+                ("reduceOnly", "true"),
+            ]
+            response = self._post_signed("/fapi/v1/order", body=payload)
+            logger.info(f"Successfully placed post-only limit order for {symbol}.")
+            return response
+        except DexAPIError as exc:
+            # Error -2026: Order would immediately trigger. This is expected for post-only failures.
+            if "-2026" in str(exc) or "Order would immediately trigger" in str(exc):
+                logger.warning(
+                    f"Post-only order for {symbol} failed as it would cross the book. Falling back."
+                )
+            else:
+                logger.error(f"Unexpected API error on post-only order for {symbol}, falling back anyway: {exc}")
+        except (requests.RequestException, KeyError, IndexError) as exc:
+            logger.warning(
+                f"Failed to place post-only order for {symbol} due to connection or data issue. Falling back. Error: {exc}"
+            )
+
+        # --- 2. Fallback to Stop-Market Order ---
+        logger.info(f"Fallback: Closing {symbol} with a stop-market order.")
+        current_price = self.get_price(symbol)
+
+        # To trigger the stop order immediately, set stopPrice through the current mark price.
+        if close_side == "SELL":  # Closing a long, stop triggers when price <= stopPrice
+            stop_price = current_price * Decimal("0.995")
+        else:  # Closing a short, stop triggers when price >= stopPrice
+            stop_price = current_price * Decimal("1.005")
+
         price_precision = -tick_size.normalize().as_tuple().exponent
-        stop_price_str = f"{stop_price:.{price_precision}f}"
+        stop_price_rounded = round(stop_price / tick_size) * tick_size
+        stop_price_str = f"{stop_price_rounded:.{price_precision}f}"
 
-        # 2. Place a closePosition market order to close the position.
-        # NOTE: This uses closePosition=true, which the provided docs state is for
-        # STOP_MARKET or TAKE_PROFIT_MARKET orders. We assume it also works for
-        # a standard MARKET order to satisfy the "close-all" requirement.
-        order_payload: List[Tuple[str, Any]] = [
+        payload: List[Tuple[str, Any]] = [
             ("symbol", symbol),
             ("side", close_side),
             ("type", "STOP_MARKET"),
@@ -485,10 +523,8 @@ class AsterClient:
             ("closePosition", "true"),
             ("priceProtect", "FALSE"),
         ]
-
-        logger.info("Placing closePosition MARKET order with payload: %s", dict(order_payload))
-        order_response = self._post_signed("/fapi/v1/order", body=order_payload)
-        return order_response
+        logger.info("Placing closePosition STOP_MARKET order with payload: %s", dict(payload))
+        return self._post_signed("/fapi/v1/order", body=payload)
 
     def cancel_order(
         self,
