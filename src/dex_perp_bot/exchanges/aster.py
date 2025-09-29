@@ -363,6 +363,11 @@ class AsterClient:
                 f"Increase margin or leverage."
             )
 
+        if qty > max_quantity:
+            raise ValueError(
+                f"Calculated quantity {qty} exceeds the maximum allowed quantity {max_quantity} for a {order_type} order."
+            )
+
         # 5. Set leverage
         logger.info("Setting leverage for %s to %sx", symbol, leverage)
         self._post_signed(
