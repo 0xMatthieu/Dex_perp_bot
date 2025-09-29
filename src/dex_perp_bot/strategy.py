@@ -163,6 +163,7 @@ def run_arbitrage_strategy(
     # 3. Check if the current portfolio already matches the best opportunity.
     hl_positions = hyperliquid_client.get_all_positions()
     aster_positions = aster_client.get_all_positions()
+    logger.info(f"Current positions: Hyperliquid={hl_positions}, Aster={aster_positions}")
 
     if _is_portfolio_matching_opportunity(hl_positions, aster_positions, best_opp):
         logger.info("Already in optimal position for imminent funding. Holding position.")
