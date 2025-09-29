@@ -137,7 +137,7 @@ def run_arbitrage_strategy(
     capital_usd: Decimal,
     min_apy_diff_pct: Decimal = Decimal("0"),
     interval_minutes: int = 5,
-    trigger_execution = True,
+    trigger_execution = False,
 ) -> None:
     """
     Main strategy function to find and act on imminent funding rate opportunities.
