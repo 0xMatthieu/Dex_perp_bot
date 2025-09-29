@@ -158,6 +158,20 @@ def fetch_and_compare_funding_rates(
     current_time_ms = int(time.time() * 1000)
     minutes_to_ms = imminent_funding_minutes * 60 * 1000
 
+    # Print current time and next funding times for context
+    current_time_dt = datetime.fromtimestamp(current_time_ms / 1000, tz=timezone.utc)
+    print(f"Current Time:              {current_time_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    if aster_rates:
+        aster_next_funding_ms = next(iter(aster_rates.values())).next_funding_time_ms
+        if aster_next_funding_ms:
+            aster_next_funding_dt = datetime.fromtimestamp(aster_next_funding_ms / 1000, tz=timezone.utc)
+            print(f"Next Aster Funding Time:     {aster_next_funding_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    if hyperliquid_rates:
+        hl_next_funding_ms = next(iter(hyperliquid_rates.values())).next_funding_time_ms
+        if hl_next_funding_ms:
+            hl_next_funding_dt = datetime.fromtimestamp(hl_next_funding_ms / 1000, tz=timezone.utc)
+            print(f"Next Hyperliquid Funding Time: {hl_next_funding_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
     comparisons: List[FundingComparison] = []
     for symbol in common_symbols:
         aster_rate = aster_rates[symbol]
