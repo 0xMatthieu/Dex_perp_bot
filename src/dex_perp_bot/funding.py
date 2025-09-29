@@ -29,6 +29,10 @@ class FundingComparison:
     long_venue: str
     short_venue: str
     apy_difference: Decimal
+    apy_aster: Decimal
+    apy_hyperliquid: Decimal
+    rate_aster: Decimal
+    rate_hyperliquid: Decimal
     funding_is_imminent: bool
     next_funding_time_ms: Optional[int]
     long_max_leverage: Optional[int]
@@ -146,7 +150,7 @@ def fetch_and_compare_funding_rates(
     Fetches funding rates from Aster and Hyperliquid, compares them,
     prints all combinations, and returns the top 4 opportunities.
     """
-    print("--- Fetching Funding Rates ---")
+    logger.info("--- Fetching Funding Rates ---")
     aster_rates_raw = aster_client.get_funding_rate()
     hyperliquid_rates_raw = hyperliquid_client.get_predicted_funding_rates()
 
@@ -160,17 +164,17 @@ def fetch_and_compare_funding_rates(
 
     # Print current time and next funding times for context
     current_time_dt = datetime.fromtimestamp(current_time_ms / 1000, tz=timezone.utc)
-    print(f"Current Time:              {current_time_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    logger.info(f"Current Time:              {current_time_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     if aster_rates:
         aster_next_funding_ms = next(iter(aster_rates.values())).next_funding_time_ms
         if aster_next_funding_ms:
             aster_next_funding_dt = datetime.fromtimestamp(aster_next_funding_ms / 1000, tz=timezone.utc)
-            print(f"Next Aster Funding Time:     {aster_next_funding_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            logger.info(f"Next Aster Funding Time:     {aster_next_funding_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     if hyperliquid_rates:
         hl_next_funding_ms = next(iter(hyperliquid_rates.values())).next_funding_time_ms
         if hl_next_funding_ms:
             hl_next_funding_dt = datetime.fromtimestamp(hl_next_funding_ms / 1000, tz=timezone.utc)
-            print(f"Next Hyperliquid Funding Time: {hl_next_funding_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            logger.info(f"Next Hyperliquid Funding Time: {hl_next_funding_dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
 
     comparisons: List[FundingComparison] = []
     for symbol in common_symbols:
@@ -198,6 +202,10 @@ def fetch_and_compare_funding_rates(
             long_venue="Aster",
             short_venue="Hyperliquid",
             apy_difference=aster_rate.apy - hyperliquid_rate.apy,
+            apy_aster=aster_rate.apy,
+            apy_hyperliquid=hyperliquid_rate.apy,
+            rate_aster=aster_rate.rate,
+            rate_hyperliquid=hyperliquid_rate.rate,
             funding_is_imminent=is_imminent,
             next_funding_time_ms=aster_rate.next_funding_time_ms,
             long_max_leverage=None,
@@ -211,6 +219,10 @@ def fetch_and_compare_funding_rates(
             long_venue="Hyperliquid",
             short_venue="Aster",
             apy_difference=hyperliquid_rate.apy - aster_rate.apy,
+            apy_aster=aster_rate.apy,
+            apy_hyperliquid=hyperliquid_rate.apy,
+            rate_aster=aster_rate.rate,
+            rate_hyperliquid=hyperliquid_rate.rate,
             funding_is_imminent=is_imminent,
             next_funding_time_ms=hyperliquid_rate.next_funding_time_ms,
             long_max_leverage=None,
@@ -249,6 +261,10 @@ def fetch_and_compare_funding_rates(
             long_venue=comp.long_venue,
             short_venue=comp.short_venue,
             apy_difference=comp.apy_difference,
+            apy_aster=comp.apy_aster,
+            apy_hyperliquid=comp.apy_hyperliquid,
+            rate_aster=comp.rate_aster,
+            rate_hyperliquid=comp.rate_hyperliquid,
             funding_is_imminent=comp.funding_is_imminent,
             next_funding_time_ms=comp.next_funding_time_ms,
             long_max_leverage=long_leverage,
@@ -256,11 +272,11 @@ def fetch_and_compare_funding_rates(
             is_actionable=is_actionable,
         ))
 
-    print("\n--- Top 4 Funding Rate Arbitrage Opportunities ---")
+    logger.info("\n--- Top 4 Funding Rate Arbitrage Opportunities ---")
     if not enriched_opportunities:
-        print("No opportunities found.")
+        logger.info("No opportunities found.")
     else:
         for comp in enriched_opportunities:
-            print(comp)
+            logger.info(comp)
 
     return enriched_opportunities
