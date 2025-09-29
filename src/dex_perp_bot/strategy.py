@@ -136,7 +136,8 @@ def run_arbitrage_strategy(
     leverage: int,
     capital_usd: Decimal,
     min_apy_diff_pct: Decimal = Decimal("0"),
-    imminent_funding_minutes: int = 5,
+    interval_minutes: int = 5,
+    trigger_execution = True,
 ) -> None:
     """
     Main strategy function to find and act on imminent funding rate opportunities.
@@ -144,13 +145,16 @@ def run_arbitrage_strategy(
     """
     # 1. Find all actionable funding opportunities that meet the APY threshold.
     opportunities = fetch_and_compare_funding_rates(
-        aster_client, hyperliquid_client, imminent_funding_minutes=imminent_funding_minutes
+        aster_client, hyperliquid_client, imminent_funding_minutes=interval_minutes
     )
     actionable_opportunities = [
         opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > min_apy_diff_pct and opp.is_actionable
     ]
 
-    if not actionable_opportunities:
+    if trigger_execution == True:
+        actionable_opportunities = opportunities
+
+    if not actionable_opportunities and trigger_execution == False:
         logger.info("No actionable funding opportunities found. Holding existing positions.")
         return
 
@@ -175,7 +179,7 @@ def run_arbitrage_strategy(
 
     # 4. If not in the optimal position, rebalance.
     logger.info("Portfolio does not match optimal strategy. Rebalancing.")
-    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client)
+    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, interval_minutes= interval_minutes)
 
     # 5. Calculate the new trade and execute it.
     decision = _calculate_trade_decision(
@@ -248,6 +252,7 @@ def execute_strategy(
 def cleanup_all_open_positions_and_orders(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
+    interval_minutes: int = 5,
 ) -> None:
     """
     Cleans up by cancelling all open orders and closing all open positions.
@@ -327,7 +332,7 @@ def cleanup_all_open_positions_and_orders(
     # 3. Verify all positions are closed before proceeding.
     logger.info("Verifying all positions are closed...")
     start_time = time.time()
-    timeout_seconds = 30
+    timeout_seconds = interval_minutes / 2 * 60
     while time.time() - start_time < timeout_seconds:
         try:
             hl_positions = hyperliquid_client.get_all_positions()
@@ -337,7 +342,7 @@ def cleanup_all_open_positions_and_orders(
                 break
 
             logger.info(f"Waiting for positions to close. HL: {len(hl_positions)}, Aster: {len(aster_positions)}")
-            time.sleep(2)
+            time.sleep(10)
         except Exception as exc:
             logger.warning(f"Error during position closure verification, retrying: {exc}")
             time.sleep(2)

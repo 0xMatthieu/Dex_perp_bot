@@ -537,6 +537,7 @@ class AsterClient:
                 ("timeInForce", "GTX"),  # Post-Only
                 ("reduceOnly", "true"),
             ]
+            logger.info("Placing post-only limit order with payload: %s", dict(payload))
             response = self._post_signed("/fapi/v1/order", body=payload)
             logger.info(f"Successfully placed post-only limit order for {symbol}.")
             return response

@@ -91,7 +91,7 @@ def main() -> int:
                         hyperliquid_client,
                         leverage=leverage,
                         capital_usd=capital_to_deploy,
-                        imminent_funding_minutes=LOOP_INTERVAL_MINUTES,
+                        interval_minutes=LOOP_INTERVAL_MINUTES,
                     )
 
             except DexClientError as exc:
