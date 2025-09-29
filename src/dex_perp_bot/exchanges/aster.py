@@ -42,6 +42,23 @@ class AsterClient:
         self._config = config
         self._session = session or requests.Session()
         self._time_offset_ms = 0  # serverTime - local
+        self._markets: Dict[str, Any] = {}
+
+        try:
+            logger.info("Loading markets for Aster...")
+            self.load_markets()
+            logger.info("Aster markets loaded.")
+        except Exception as exc:
+            raise DexAPIError("Failed to load Aster markets") from exc
+
+    def load_markets(self) -> None:
+        """Fetch exchange info and cache it."""
+        exchange_info = self._get_public("/fapi/v1/exchangeInfo")
+        symbols_data = exchange_info.get("symbols", [])
+        if not isinstance(symbols_data, list):
+            raise DexAPIError("Invalid 'symbols' data in Aster exchange info")
+
+        self._markets = {s["symbol"]: s for s in symbols_data if isinstance(s, dict) and "symbol" in s}
 
     # -------- Time sync (fix -1021) --------
     def sync_time(self) -> None:
@@ -159,10 +176,11 @@ class AsterClient:
         return self._get_public("/fapi/v1/depth", params={"symbol": symbol, "limit": limit})
 
     def get_symbol_filters(self, symbol: str) -> Dict[str, Decimal]:
-        """Fetch and return price/lot/notional filters for a symbol."""
-        logger.debug("Fetching exchange info for %s filters", symbol)
-        exchange_info = self._get_public("/fapi/v1/exchangeInfo")
-        symbol_info = next((s for s in exchange_info.get("symbols", []) if s["symbol"] == symbol), None)
+        """Fetch and return price/lot/notional filters for a symbol from cached markets."""
+        if not self._markets:  # Should be loaded at init, but as a safeguard
+            self.load_markets()
+
+        symbol_info = self._markets.get(symbol)
         if not symbol_info:
             raise DexAPIError(f"Could not find symbol info for {symbol}")
 
@@ -304,23 +322,11 @@ class AsterClient:
         symbol = "BTCUSDT"
 
         # 1. Query exchangeInfo for filters
-        logger.info("Fetching exchange info for %s", symbol)
-        exchange_info = self._get_public("/fapi/v1/exchangeInfo")
-        symbol_info = next((s for s in exchange_info.get("symbols", []) if s["symbol"] == symbol), None)
-        if not symbol_info:
-            raise DexAPIError(f"Could not find symbol info for {symbol}")
-
-        filters = {f["filterType"]: f for f in symbol_info.get("filters", [])}
-        price_filter = filters.get("PRICE_FILTER")
-        lot_size_filter = filters.get("LOT_SIZE")
-        min_notional_filter = filters.get("MIN_NOTIONAL")
-
-        if not all([price_filter, lot_size_filter, min_notional_filter]):
-            raise DexAPIError(f"Missing required filters for {symbol}")
-
-        tick_size = Decimal(price_filter["tickSize"])
-        step_size = Decimal(lot_size_filter["stepSize"])
-        min_notional = Decimal(min_notional_filter["notional"])
+        logger.info("Fetching symbol filters for %s", symbol)
+        filters = self.get_symbol_filters(symbol)
+        tick_size = filters["tick_size"]
+        step_size = filters["step_size"]
+        min_notional = filters["min_notional"]
 
         # 2. Query for current price
         logger.info("Fetching ticker price for %s", symbol)
