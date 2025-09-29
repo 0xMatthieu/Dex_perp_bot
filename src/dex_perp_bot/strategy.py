@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -299,5 +300,27 @@ def cleanup_all_open_positions_and_orders(
             logger.info("No open positions found on Hyperliquid.")
     except Exception as exc:
         logger.error(f"Failed to get positions from Hyperliquid: {exc}")
+
+    # 3. Verify all positions are closed before proceeding.
+    logger.info("Verifying all positions are closed...")
+    start_time = time.time()
+    timeout_seconds = 30
+    while time.time() - start_time < timeout_seconds:
+        try:
+            hl_positions = hyperliquid_client.get_all_positions()
+            aster_positions = aster_client.get_all_positions()
+            if not hl_positions and not aster_positions:
+                logger.info("Successfully verified all positions are closed.")
+                break
+
+            logger.info(f"Waiting for positions to close. HL: {len(hl_positions)}, Aster: {len(aster_positions)}")
+            time.sleep(2)
+        except Exception as exc:
+            logger.warning(f"Error during position closure verification, retrying: {exc}")
+            time.sleep(2)
+    else:
+        # This block runs if the while loop times out without a 'break'
+        logger.error(f"Timeout: Positions not confirmed closed after {timeout_seconds} seconds.")
+        # Depending on desired behavior, we could raise an exception here to halt operations.
 
     logger.info("--- Cleanup complete ---")
