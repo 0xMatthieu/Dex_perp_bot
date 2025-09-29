@@ -43,9 +43,13 @@ class FundingComparison:
         imminent_str = " (IMMINENT)" if self.funding_is_imminent else ""
         actionable_str = "" if self.is_actionable else " (NOT ACTIONABLE)"
         leverage_str = f"Lvg: {self.long_max_leverage or 'N/A'}x/{self.short_max_leverage or 'N/A'}x"
+        details_str = (
+            f"Aster APY: {self.apy_aster:.4f}% (Rate: {self.rate_aster:.8f}) | "
+            f"HL APY: {self.apy_hyperliquid:.4f}% (Rate: {self.rate_hyperliquid:.8f})"
+        )
         return (
             f"Long {self.symbol} on {self.long_venue}, Short on {self.short_venue}: "
-            f"APY Difference = {self.apy_difference:.4f}%{imminent_str}{actionable_str} | {leverage_str}"
+            f"APY Difference = {self.apy_difference:.4f}%{imminent_str}{actionable_str} | {leverage_str} | {details_str}"
         )
 
 
