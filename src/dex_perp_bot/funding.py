@@ -206,38 +206,7 @@ def fetch_and_compare_funding_rates(
             if 0 < time_diff_ms <= minutes_to_ms:
                 hl_funding_imminent = True
 
-        if not (aster_funding_imminent or hl_funding_imminent):
-            continue
-
-        # Strategy: Prioritize the more frequent (Hyperliquid) funding event if both are imminent.
-        if hl_funding_imminent:
-            # Hyperliquid is the driver. Use 1h basis.
-            apy_aster_basis = aster_rate.apy_1h
-            apy_hl_basis = hyperliquid_rate.apy_1h
-            apy_basis = "1h"
-
-            if hyperliquid_rate.rate < 0:  # Negative funding on HL -> longs get paid
-                comparisons.append(FundingComparison(
-                    symbol=symbol, long_venue="Hyperliquid", short_venue="Aster",
-                    apy_difference=apy_hl_basis - apy_aster_basis, apy_difference_basis=apy_basis,
-                    apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
-                    apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
-                    rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
-                    funding_is_imminent=True, next_funding_time_ms=hyperliquid_rate.next_funding_time_ms,
-                    long_max_leverage=None, short_max_leverage=None, is_actionable=False,
-                ))
-            elif hyperliquid_rate.rate > 0:  # Positive funding on HL -> shorts get paid
-                comparisons.append(FundingComparison(
-                    symbol=symbol, long_venue="Aster", short_venue="Hyperliquid",
-                    apy_difference=apy_aster_basis - apy_hl_basis, apy_difference_basis=apy_basis,
-                    apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
-                    apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
-                    rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
-                    funding_is_imminent=True, next_funding_time_ms=hyperliquid_rate.next_funding_time_ms,
-                    long_max_leverage=None, short_max_leverage=None, is_actionable=False,
-                ))
-
-        elif aster_funding_imminent:
+        if aster_funding_imminent:
             # Only Aster funding is imminent. Use 4h basis.
             apy_aster_basis = aster_rate.apy_4h
             apy_hl_basis = hyperliquid_rate.apy_4h
@@ -250,7 +219,7 @@ def fetch_and_compare_funding_rates(
                     apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
                     apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
                     rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
-                    funding_is_imminent=True, next_funding_time_ms=aster_rate.next_funding_time_ms,
+                    funding_is_imminent=aster_funding_imminent, next_funding_time_ms=aster_rate.next_funding_time_ms,
                     long_max_leverage=None, short_max_leverage=None, is_actionable=False,
                 ))
             elif aster_rate.rate > 0:  # Positive funding on Aster -> shorts get paid
@@ -260,10 +229,36 @@ def fetch_and_compare_funding_rates(
                     apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
                     apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
                     rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
-                    funding_is_imminent=True, next_funding_time_ms=aster_rate.next_funding_time_ms,
+                    funding_is_imminent=aster_funding_imminent, next_funding_time_ms=aster_rate.next_funding_time_ms,
                     long_max_leverage=None, short_max_leverage=None, is_actionable=False,
                 ))
+        # Strategy: Prioritize the more frequent (Hyperliquid) funding event if both are imminent.
+        else:
+            # Hyperliquid is the driver. Use 1h basis.
+            apy_aster_basis = aster_rate.apy_1h
+            apy_hl_basis = hyperliquid_rate.apy_1h
+            apy_basis = "1h"
 
+            if hyperliquid_rate.rate < 0:  # Negative funding on HL -> longs get paid
+                comparisons.append(FundingComparison(
+                    symbol=symbol, long_venue="Hyperliquid", short_venue="Aster",
+                    apy_difference=apy_hl_basis - apy_aster_basis, apy_difference_basis=apy_basis,
+                    apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
+                    apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
+                    rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
+                    funding_is_imminent=hl_funding_imminent, next_funding_time_ms=hyperliquid_rate.next_funding_time_ms,
+                    long_max_leverage=None, short_max_leverage=None, is_actionable=False,
+                ))
+            elif hyperliquid_rate.rate > 0:  # Positive funding on HL -> shorts get paid
+                comparisons.append(FundingComparison(
+                    symbol=symbol, long_venue="Aster", short_venue="Hyperliquid",
+                    apy_difference=apy_aster_basis - apy_hl_basis, apy_difference_basis=apy_basis,
+                    apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
+                    apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
+                    rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
+                    funding_is_imminent=hl_funding_imminent, next_funding_time_ms=hyperliquid_rate.next_funding_time_ms,
+                    long_max_leverage=None, short_max_leverage=None, is_actionable=False,
+                ))
     # Sort by the highest APY difference
     sorted_comparisons = sorted(comparisons, key=lambda x: x.apy_difference, reverse=True)
 
