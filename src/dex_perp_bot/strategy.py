@@ -210,12 +210,12 @@ def execute_strategy(
     short_qty = decision.short_qty if isinstance(short_venue_client, AsterClient) else float(decision.short_qty)
 
     long_order_res = long_venue_client.place_order(
-        symbol=decision.long_symbol, side="BUY", order_type="MARKET", quantity=long_qty
+        symbol=decision.long_symbol, side="BUY", order_type="MAKER_TAKER", quantity=long_qty
     )
     logger.info(f"Long order ({decision.opportunity.long_venue}) response: {long_order_res}")
 
     short_order_res = short_venue_client.place_order(
-        symbol=decision.short_symbol, side="SELL", order_type="MARKET", quantity=short_qty
+        symbol=decision.short_symbol, side="SELL", order_type="MAKER_TAKER", quantity=short_qty
     )
     logger.info(f"Short order ({decision.opportunity.short_venue}) response: {short_order_res}")
 

@@ -198,37 +198,83 @@ class AsterClient:
         price: Optional[Union[float, Decimal]] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Place an order on Aster, separate from the test-specific one."""
+        """
+        Place an order on Aster.
+        If order_type is MAKER_TAKER, attempts a post-only limit order before
+        falling back to a market order.
+        """
         if params is None:
             params = {}
 
         filters = self.get_symbol_filters(symbol)
-        step_size = filters['step_size']
-        tick_size = filters['tick_size']
+        tick_size, step_size = filters['tick_size'], filters['step_size']
 
+        qty_decimal = Decimal(str(quantity))
+        qty_rounded = (qty_decimal // step_size) * step_size
+        if qty_rounded == 0:
+            raise ValueError(f"Quantity {quantity} for {symbol} is zero after rounding to step size {step_size}")
+
+        if order_type.upper() == "MAKER_TAKER":
+            # --- 1. Attempt Post-Only Limit Order ---
+            try:
+                logger.info(f"Attempting to open {symbol} with post-only limit order.")
+                order_book = self._get_order_book(symbol)
+                if not order_book.get("bids") or not order_book.get("asks"):
+                    raise DexAPIError(f"Order book for {symbol} is empty, cannot place limit order.")
+
+                best_bid = Decimal(order_book["bids"][0][0])
+                best_ask = Decimal(order_book["asks"][0][0])
+
+                # Place one tick past the passive side of the book to be a maker
+                limit_price = (best_bid - tick_size) if side.upper() == "BUY" else (best_ask + tick_size)
+
+                price_precision = -tick_size.normalize().as_tuple().exponent
+                price_str = f"{limit_price:.{price_precision}f}"
+                qty_precision = -step_size.normalize().as_tuple().exponent
+                qty_str = f"{qty_rounded:.{qty_precision}f}"
+
+                payload: List[Tuple[str, Any]] = [
+                    ("symbol", symbol), ("side", side.upper()), ("type", "LIMIT"),
+                    ("quantity", qty_str), ("price", price_str), ("timeInForce", "GTX"),
+                ]
+                if params.get("reduceOnly"):
+                    payload.append(("reduceOnly", "true"))
+
+                response = self._post_signed("/fapi/v1/order", body=payload)
+                logger.info(f"Successfully placed post-only limit order for {symbol}.")
+                return response
+            except DexAPIError as exc:
+                if "-2026" in str(exc) or "Order would immediately trigger" in str(exc):
+                    logger.warning(f"Post-only order for {symbol} failed as it would cross. Falling back.")
+                else:
+                    logger.error(f"Unexpected API error on post-only order: {exc}. Falling back.")
+            except (requests.RequestException, KeyError, IndexError) as exc:
+                logger.warning(f"Failed to place post-only order for {symbol}: {exc}. Falling back.")
+
+            # --- 2. Fallback to Market Order ---
+            logger.info(f"Fallback: Opening {symbol} with a market order.")
+            market_params = params.copy()
+            market_params.pop("timeInForce", None)
+            return self.place_order(symbol, side, "MARKET", quantity, None, market_params)
+
+        # --- Standard Order Logic ---
         order_payload: List[Tuple[str, Any]] = [
-            ("symbol", symbol),
-            ("side", side.upper()),
-            ("type", order_type.upper()),
+            ("symbol", symbol), ("side", side.upper()), ("type", order_type.upper()),
         ]
 
         if "newClientOrderId" not in params:
             order_payload.append(("newClientOrderId", f"dxp-{uuid.uuid4().hex}"))
 
         qty_precision = -step_size.normalize().as_tuple().exponent
-        qty_str = f"{Decimal(str(quantity)):.{qty_precision}f}"
+        qty_str = f"{qty_rounded:.{qty_precision}f}"
         order_payload.append(("quantity", qty_str))
 
         if order_type.upper() == "LIMIT":
             if price is None:
                 raise ValueError("Price must be provided for LIMIT orders")
-
             price_precision = -tick_size.normalize().as_tuple().exponent
             price_str = f"{Decimal(str(price)):.{price_precision}f}"
-            order_payload.extend([
-                ("price", price_str),
-                ("timeInForce", params.get("timeInForce", "GTC")),
-            ])
+            order_payload.extend([("price", price_str), ("timeInForce", params.get("timeInForce", "GTC"))])
 
         for key, value in params.items():
             if key not in ['timeInForce', 'newClientOrderId']:

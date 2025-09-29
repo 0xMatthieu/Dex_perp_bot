@@ -130,20 +130,63 @@ class HyperliquidClient:
         price: Optional[float] = None,
         params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Place an order on Hyperliquid."""
+        """
+        Place an order on Hyperliquid.
+        If order_type is MAKER_TAKER, attempts a post-only limit order before
+        falling back to a market order.
+        """
+        order_params = params or {}
+
+        if order_type.upper() == "MAKER_TAKER":
+            # --- 1. Attempt Post-Only Limit Order ---
+            try:
+                logger.info(f"Attempting to open {symbol} with post-only limit order.")
+                market_info = self._client.market(symbol)
+                tick_size = Decimal(str(market_info['precision']['price']))
+                step_size = Decimal(str(market_info['precision']['amount']))
+
+                order_book = self._client.fetch_order_book(symbol)
+                if not order_book.get("bids") or not order_book.get("asks"):
+                    raise DexAPIError(f"Order book for {symbol} is empty.")
+
+                best_bid = Decimal(str(order_book["bids"][0][0]))
+                best_ask = Decimal(str(order_book["asks"][0][0]))
+
+                limit_price = (best_bid - tick_size) if side.lower() == "buy" else (best_ask + tick_size)
+                qty_rounded = float((Decimal(str(quantity)) // step_size) * step_size)
+                if qty_rounded == 0:
+                    raise ValueError(f"Quantity {quantity} rounded to zero with step size {step_size}")
+
+                post_only_params = order_params.copy()
+                post_only_params["postOnly"] = True
+
+                logger.info(f"Placing post-only LIMIT {side} for {qty_rounded} {symbol} @ {limit_price}")
+                return self._client.create_order(
+                    symbol=symbol, type="limit", side=side.lower(),
+                    amount=qty_rounded, price=float(limit_price), params=post_only_params,
+                )
+            except Exception as exc:
+                err_msg = str(exc).lower()
+                if "post-only" in err_msg or "would cross" in err_msg or "fill immediately" in err_msg:
+                    logger.warning(f"Post-only for {symbol} failed, would cross book. Falling back. Error: {exc}")
+                else:
+                    logger.warning(f"Post-only for {symbol} failed: {exc}. Falling back.")
+
+            # --- 2. Fallback to Market Order ---
+            logger.info(f"Fallback: Opening {symbol} with a market order.")
+            market_params = order_params.copy()
+            market_params.pop("postOnly", None)
+            return self.place_order(symbol, side, "MARKET", quantity, None, market_params)
+
+        # --- Standard Order Logic ---
         price_for_order = price
         if order_type.upper() == "MARKET" and price is None:
-            # Market orders require a price for slippage calculation in the underlying client
             price_for_order = float(self.get_price(symbol))
 
         try:
             return self._client.create_order(
-                symbol=symbol,
-                type=order_type.lower(),
-                side=side.lower(),
-                amount=quantity,
-                price=price_for_order,
-                params=params or {},
+                symbol=symbol, type=order_type.lower(), side=side.lower(),
+                amount=quantity, price=price_for_order, params=order_params,
             )
         except Exception as exc:
             raise DexAPIError("Failed to create Hyperliquid order") from exc
