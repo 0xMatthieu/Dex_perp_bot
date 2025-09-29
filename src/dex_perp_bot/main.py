@@ -52,7 +52,7 @@ def main() -> int:
         aster_client.sync_time()
     except DexAPIError as exc:
         logger.error("Failed to sync time with Aster: %s", exc)
-    LOOP_INTERVAL_MINUTES = 5
+    LOOP_INTERVAL_MINUTES = 10
     LOOP_INTERVAL_SECONDS = LOOP_INTERVAL_MINUTES*60  # For testing, run every 5 minutes.
     logger.info(f"Starting strategy loop. Running every {LOOP_INTERVAL_SECONDS} seconds. Press Ctrl+C to stop.")
 
@@ -67,8 +67,8 @@ def main() -> int:
                 capital_allocation_pct = Decimal("1.0")
 
                 # Determine capital from the smaller of the two available balances
-                balance_hl = hyperliquid_client.get_wallet_balance().available or Decimal("0")
-                balance_aster = aster_client.get_wallet_balance().available or Decimal("0")
+                balance_hl = hyperliquid_client.get_wallet_balance().total or Decimal("0")
+                balance_aster = aster_client.get_wallet_balance().total or Decimal("0")
                 available_capital = min(balance_hl, balance_aster)
                 capital_to_deploy = available_capital * capital_allocation_pct
 
