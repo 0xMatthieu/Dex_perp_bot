@@ -218,6 +218,26 @@ def execute_strategy(
         symbol=decision.short_symbol, side="SELL", order_type="MARKET", quantity=short_qty
     )
     logger.info(f"Short order ({decision.opportunity.short_venue}) response: {short_order_res}")
+
+    # 3. Verify positions were opened successfully.
+    logger.info("Verifying positions are open and match the strategy...")
+    start_time = time.time()
+    timeout_seconds = 30
+    while time.time() - start_time < timeout_seconds:
+        try:
+            hl_positions = hyperliquid_client.get_all_positions()
+            aster_positions = aster_client.get_all_positions()
+            if _is_portfolio_matching_opportunity(hl_positions, aster_positions, decision.opportunity):
+                logger.info("Successfully verified new positions are open.")
+                break
+
+            logger.info(f"Waiting for positions to open. HL: {len(hl_positions)}, Aster: {len(aster_positions)}")
+            time.sleep(2)
+        except Exception as exc:
+            logger.warning(f"Error during position opening verification, retrying: {exc}")
+            time.sleep(2)
+    else:
+        logger.error(f"Timeout: Positions not confirmed open after {timeout_seconds} seconds.")
     
     logger.info("Strategy execution complete.")
 
