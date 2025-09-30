@@ -181,6 +181,9 @@ def run_arbitrage_strategy(
     logger.info("Portfolio does not match optimal strategy. Rebalancing.")
     cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, interval_minutes= interval_minutes * 3 / 4)
 
+    # wait a little bit to let wallet balance refresh
+    time.sleep(30)
+
     # 5. Calculate the new trade and execute it.
     decision = _calculate_trade_decision(
         aster_client, hyperliquid_client, best_opp, effective_leverage, capital_usd
