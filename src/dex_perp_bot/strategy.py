@@ -179,7 +179,7 @@ def run_arbitrage_strategy(
 
     # 4. If not in the optimal position, rebalance.
     logger.info("Portfolio does not match optimal strategy. Rebalancing.")
-    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, interval_minutes= interval_minutes)
+    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, interval_minutes= interval_minutes * 3 / 4)
 
     # 5. Calculate the new trade and execute it.
     decision = _calculate_trade_decision(
@@ -332,7 +332,7 @@ def cleanup_all_open_positions_and_orders(
     # 3. Verify all positions are closed before proceeding.
     logger.info("Verifying all positions are closed...")
     start_time = time.time()
-    timeout_seconds = interval_minutes / 2 * 60
+    timeout_seconds = interval_minutes * 60
     while time.time() - start_time < timeout_seconds:
         try:
             hl_positions = hyperliquid_client.get_all_positions()
@@ -342,7 +342,7 @@ def cleanup_all_open_positions_and_orders(
                 break
 
             logger.info(f"Waiting for positions to close. HL: {len(hl_positions)}, Aster: {len(aster_positions)}")
-            time.sleep(10)
+            time.sleep(30)
         except Exception as exc:
             logger.warning(f"Error during position closure verification, retrying: {exc}")
             time.sleep(2)
