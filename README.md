@@ -32,6 +32,12 @@ The bot's primary goal is to capture funding rate payments by positioning itself
     *   The bot calculates that going **long on Hyperliquid** and **short on Aster** offers the best APY difference.
     *   If the portfolio is not already in this state, it will close any existing positions and open new ones to capture the 11:00 UTC Hyperliquid funding payment.
 
+*   **Order Execution Strategy:**
+    To minimize trading fees, the bot employs a "maker-taker" strategy for both opening and closing positions.
+    1.  **Maker Attempt:** It first attempts to place a **post-only limit order** on the passive side of the order book. This is designed to add liquidity and potentially earn a maker rebate.
+    2.  **Taker Fallback:** If the post-only order would cross the spread and execute immediately, the exchange rejects it. The bot catches this and immediately falls back to placing a **market order**. This ensures the position is established quickly, which is critical for capturing imminent funding payments.
+    This two-step process balances the goal of fee reduction with the primary objective of timely execution.
+
 ## Project layout
 
 ```
