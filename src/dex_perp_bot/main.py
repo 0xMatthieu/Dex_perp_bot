@@ -63,8 +63,8 @@ def main() -> int:
                     f"---------------------------------------------- "
                 )
                 leverage = 4
-                # Use 100% of the available capital. To be more conservative, set this below 1.0.
-                capital_allocation_pct = Decimal("1.0")
+                # Use % of the available capital. To be more conservative, set this below 1.0.
+                capital_allocation_pct = Decimal("0.95")
 
                 # Determine capital from the smaller of the two available balances
                 balance_hl = hyperliquid_client.get_wallet_balance().total or Decimal("0")
