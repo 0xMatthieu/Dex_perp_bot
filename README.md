@@ -57,7 +57,7 @@ tests/
 
 ## Requirements
 
-* Python 3.11+
+* Python 3.8+
 * Hyperliquid and Aster API credentials exported as environment variables or stored in a `.env` file.
 
 Install the runtime dependencies using `pip`:
@@ -113,8 +113,4 @@ To run the funding rate comparison test:
 python tests/test.py
 ```
 
-To run unit tests (if any):
-```bash
-pytest
-```
 
