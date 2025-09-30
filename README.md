@@ -9,6 +9,29 @@ The core logic is to:
 4.  Check the current portfolio. If not already in the optimal position, it will close all existing positions and open a new delta-neutral position (long on one venue, short on the other) to capture the best funding rate.
 5.  Hold positions between funding events to farm potential airdrop points.
 
+## Strategy Details
+
+The bot's primary goal is to capture funding rate payments by positioning itself correctly just before a funding event occurs. Since Hyperliquid and Aster have different funding intervals, the bot uses a time-based approach to decide which opportunity to pursue.
+
+*   **Funding Intervals:**
+    *   **Hyperliquid:** Funding occurs **every hour**. APY calculations are based on this 1-hour interval.
+    *   **Aster:** Funding occurs **every 4 hours** (at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC). APY calculations use this 4-hour interval.
+
+*   **Decision Logic:**
+    1.  The bot checks for "imminent" funding events on both exchanges. An event is considered imminent if it's scheduled to occur within the bot's lookahead window (e.g., the next 20 minutes).
+    2.  If a **Hyperliquid** funding event is imminent, it becomes the primary target. The bot compares the APYs using a **1-hour basis**.
+    3.  If only an **Aster** funding event is imminent, the bot compares APYs using a **4-hour basis**.
+    4.  The bot determines the profitable side of the trade (which venue to long, which to short) based on which exchange is paying more for a position. A negative funding rate means longs get paid, while a positive rate means shorts get paid.
+
+*   **Example Scenario:**
+    *   It's 10:45 UTC. The next Hyperliquid funding is at 11:00 UTC (imminent). The next Aster funding is at 12:00 UTC (not imminent).
+    *   The bot will use the **1-hour APY basis** for its comparison.
+    *   Suppose for BTC:
+        *   Hyperliquid's funding rate is `-0.001%` (longs get paid). This translates to a positive APY for longs.
+        *   Aster's funding rate is `+0.0005%` (shorts get paid). This is a cost for longs.
+    *   The bot calculates that going **long on Hyperliquid** and **short on Aster** offers the best APY difference.
+    *   If the portfolio is not already in this state, it will close any existing positions and open new ones to capture the 11:00 UTC Hyperliquid funding payment.
+
 ## Project layout
 
 ```
@@ -53,7 +76,6 @@ The application expects the following environment variables:
 | `HYPERLIQUID_ADDRESS_WALLET` | EOA address connected to the Hyperliquid account |
 | `ASTER_API_KEY` | Aster API key |
 | `ASTER_API_SECRET` | Aster API secret |
-| `ASTER_BASE_URL` | Base URL for the Aster REST API (e.g., `https://fapi.asterdex.com`) |
 
 The following variables for Aster are optional and have sensible defaults:
 
