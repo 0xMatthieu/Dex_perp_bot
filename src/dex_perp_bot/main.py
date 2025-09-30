@@ -6,7 +6,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Add project root to path to allow importing from `tests`
 project_root = Path(__file__).resolve().parent.parent.parent
@@ -97,8 +97,14 @@ def main() -> int:
             except DexClientError as exc:
                 logger.exception("An error occurred during the strategy execution cycle: %s", exc)
 
-            logger.info(f"Strategy cycle complete. Waiting for {LOOP_INTERVAL_SECONDS} seconds...")
-            time.sleep(LOOP_INTERVAL_SECONDS)
+            now = datetime.now()
+            # Aligns execution to the clock, ensuring it runs at consistent intervals (e.g., every 20 mins at :00, :20, :40).
+            seconds_into_hour = now.minute * 60 + now.second + now.microsecond / 1_000_000
+            wait_seconds = LOOP_INTERVAL_SECONDS - (seconds_into_hour % LOOP_INTERVAL_SECONDS)
+            next_run_time = (now + timedelta(seconds=wait_seconds)).strftime("%H:%M:%S")
+
+            logger.info(f"Strategy cycle complete. Waiting for {wait_seconds:.0f} seconds until next run at {next_run_time}...")
+            time.sleep(wait_seconds)
 
     except KeyboardInterrupt:
         logger.info("Shutdown signal received. Exiting.")
