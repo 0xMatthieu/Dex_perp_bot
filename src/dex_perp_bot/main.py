@@ -64,7 +64,7 @@ def main() -> int:
                 )
                 leverage = 4
                 # Use % of the available capital. To be more conservative, set this below 1.0.
-                capital_allocation_pct = Decimal("0.95")
+                capital_allocation_pct = Decimal("0.9")
 
                 # Determine capital from the smaller of the two available balances
                 balance_hl = hyperliquid_client.get_wallet_balance().total or Decimal("0")
@@ -73,6 +73,8 @@ def main() -> int:
                 capital_to_deploy = available_capital * capital_allocation_pct
 
                 logger.info(
+                    f"Available capital on Hyperliquid: ${hyperliquid_client.get_wallet_balance().total:.2f}. "
+                    f"Available capital on Aster: ${aster_client.get_wallet_balance().total:.2f}. "
                     f"Available capital (min across exchanges): ${available_capital:.2f}. "
                     f"Allocating {capital_allocation_pct:.0%} (${capital_to_deploy:.2f}) with {leverage}x leverage."
                 )
