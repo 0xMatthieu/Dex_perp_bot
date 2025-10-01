@@ -70,11 +70,13 @@ def main() -> int:
                 balance_hl = hyperliquid_client.get_wallet_balance().total or Decimal("0")
                 balance_aster = aster_client.get_wallet_balance().total or Decimal("0")
                 available_capital = min(balance_hl, balance_aster)
+                total_capital = balance_hl + balance_aster
                 capital_to_deploy = available_capital * capital_allocation_pct
 
                 logger.info(
-                    f"Available capital on Hyperliquid: ${hyperliquid_client.get_wallet_balance().total:.2f}. "
-                    f"Available capital on Aster: ${aster_client.get_wallet_balance().total:.2f}. "
+                    f"Available capital on Hyperliquid: ${balance_hl:.2f}. "
+                    f"Available capital on Aster: ${balance_aster:.2f}. "
+                    f"Total capital is: ${total_capital:.2f}. "
                     f"Available capital (min across exchanges): ${available_capital:.2f}. "
                     f"Allocating {capital_allocation_pct:.0%} (${capital_to_deploy:.2f}) with {leverage}x leverage."
                 )
