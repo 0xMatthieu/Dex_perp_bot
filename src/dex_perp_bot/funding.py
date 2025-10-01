@@ -209,7 +209,7 @@ def fetch_and_compare_funding_rates(
         if aster_funding_imminent:
             # Only Aster funding is imminent. Use 4h basis.
             apy_aster_basis = aster_rate.apy_4h
-            apy_hl_basis = hyperliquid_rate.apy_4h
+            apy_hl_basis = hyperliquid_rate.apy_1h  # still use 1h basis on HL because this is what you will really paid
             apy_basis = "4h"
 
             if aster_rate.rate < 0:  # Negative funding on Aster -> longs get paid
@@ -242,7 +242,7 @@ def fetch_and_compare_funding_rates(
             if hyperliquid_rate.rate < 0:  # Negative funding on HL -> longs get paid
                 comparisons.append(FundingComparison(
                     symbol=symbol, long_venue="Hyperliquid", short_venue="Aster",
-                    apy_difference=apy_hl_basis - apy_aster_basis, apy_difference_basis=apy_basis,
+                    apy_difference=apy_hl_basis, apy_difference_basis=apy_basis,
                     apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
                     apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
                     rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
@@ -252,7 +252,7 @@ def fetch_and_compare_funding_rates(
             elif hyperliquid_rate.rate > 0:  # Positive funding on HL -> shorts get paid
                 comparisons.append(FundingComparison(
                     symbol=symbol, long_venue="Aster", short_venue="Hyperliquid",
-                    apy_difference=apy_aster_basis - apy_hl_basis, apy_difference_basis=apy_basis,
+                    apy_difference=apy_hl_basis, apy_difference_basis=apy_basis,
                     apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
                     apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
                     rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
