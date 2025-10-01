@@ -98,6 +98,8 @@ def _parse_aster_funding_rates(raw_rates: List[Dict], aster_client: AsterClient)
         # Normalize symbol from BTCUSDT -> BTC
         normalized_symbol = symbol.replace("USDT", "").replace("USD", "")
         rate = Decimal(rate_str)
+        if rate.is_zero():
+            continue
         # Aster funding is every 4 hours (6 times a day)
         apy_4h = _calculate_apy(rate, periods_per_day=6)
         apy_1h = apy_4h / 4
