@@ -9,6 +9,7 @@ import time
 import urllib.parse
 import uuid
 from decimal import Decimal, InvalidOperation
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import requests
@@ -126,6 +127,13 @@ class AsterClient:
             params["startTime"] = start_time
         if end_time is not None:
             params["endTime"] = end_time
+
+        if start_time is None and end_time is None:
+            now = datetime.now(timezone.utc)
+            start_of_hour = now.replace(minute=0, second=0, microsecond=0)
+            params["startTime"] = int(start_of_hour.timestamp() * 1000)
+            params["endTime"] = int(now.timestamp() * 1000)
+
         if limit is not None:
             params["limit"] = limit
         else:
