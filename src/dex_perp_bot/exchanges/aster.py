@@ -9,7 +9,7 @@ import time
 import urllib.parse
 import uuid
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import requests
@@ -76,6 +76,28 @@ class AsterClient:
     def _now_ms(self) -> int:
         return int(time.time() * 1000) + self._time_offset_ms
 
+    def _get_funding_time_range_ms(self) -> Tuple[int, int]:
+        """Calculates the last and next funding timestamps for Aster."""
+        now = datetime.now(timezone.utc)
+        # Funding is every 4 hours.
+        funding_hours = [0, 4, 8, 12, 16, 20]
+
+        next_funding_dt = None
+        for hour in funding_hours:
+            potential_dt = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if potential_dt > now:
+                next_funding_dt = potential_dt
+                break
+
+        if next_funding_dt is None:  # all of today's funding times have passed
+            tomorrow = now + timedelta(days=1)
+            next_funding_dt = tomorrow.replace(hour=funding_hours[0], minute=0, second=0, microsecond=0)
+
+        # The previous funding time is 4 hours before the next one.
+        previous_funding_dt = next_funding_dt - timedelta(hours=4)
+
+        return int(previous_funding_dt.timestamp() * 1000), int(next_funding_dt.timestamp() * 1000)
+
     # -------- Signing primitives (Binance-style) --------
     def _urlencode(self, items: KeyVals) -> str:
         # EXACT encoding used to sign & send
@@ -129,10 +151,9 @@ class AsterClient:
             params["endTime"] = end_time
 
         if start_time is None and end_time is None:
-            now = datetime.now(timezone.utc)
-            start_of_hour = now.replace(minute=0, second=0, microsecond=0)
-            params["startTime"] = int(start_of_hour.timestamp() * 1000)
-            params["endTime"] = int(now.timestamp() * 1000)
+            start_time, end_time = self._get_funding_time_range_ms()
+            params["startTime"] = start_time
+            params["endTime"] = end_time
 
         if limit is not None:
             params["limit"] = limit
