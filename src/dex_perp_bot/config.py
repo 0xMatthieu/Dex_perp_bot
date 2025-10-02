@@ -86,7 +86,7 @@ class Settings:
             # "total" candidates from v4/account: totalWalletBalance, totalMarginBalance
             total_fields=_split_csv(os.getenv(
                 "ASTER_TOTAL_FIELDS",
-                "totalWalletBalance,totalMarginBalance",
+                "totalMarginBalance,totalWalletBalance",
             )),
             request_timeout=float(os.getenv("ASTER_TIMEOUT", "10")),
         )
