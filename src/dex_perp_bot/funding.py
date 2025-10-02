@@ -57,25 +57,6 @@ class FundingComparison:
         )
 
 
-def _get_next_aster_funding_time_ms() -> int:
-    """
-    Calculates the next funding time for Aster, assuming funding at 00, 08, 16 UTC.
-    """
-    now = datetime.now(timezone.utc)
-    funding_hours = [0, 4, 8, 12, 16, 20]
-
-    next_funding_dt = None
-    for hour in funding_hours:
-        potential_dt = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if potential_dt > now:
-            next_funding_dt = potential_dt
-            break
-
-    if next_funding_dt is None:  # all of today's funding times have passed
-        tomorrow = now + timedelta(days=1)
-        next_funding_dt = tomorrow.replace(hour=funding_hours[0], minute=0, second=0, microsecond=0)
-
-    return int(next_funding_dt.timestamp() * 1000)
 
 
 def _calculate_apy(rate: Decimal, periods_per_day: int) -> Decimal:
@@ -86,12 +67,11 @@ def _calculate_apy(rate: Decimal, periods_per_day: int) -> Decimal:
 def _parse_aster_funding_rates(raw_rates: List[Dict], aster_client: AsterClient) -> Dict[str, FundingRate]:
     """Parse and normalize funding rates from Aster."""
     parsed: Dict[str, FundingRate] = {}
-    # Calculate the single next funding time for all Aster pairs.
-    next_funding_time_ms = _get_next_aster_funding_time_ms()
 
     for item in raw_rates:
         symbol = item.get("symbol")
-        rate_str = item.get("fundingRate")
+        rate_str = item.get("lastFundingRate")
+        next_funding_time_ms = item.get("nextFundingTime")
         if not symbol or not rate_str:
             continue
 
