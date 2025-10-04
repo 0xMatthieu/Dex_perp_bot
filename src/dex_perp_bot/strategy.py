@@ -201,9 +201,6 @@ def perform_hourly_rebalance(
     It closes existing positions and opens a new one based on funding and spread.
     """
     logger.info("--- Performing Hourly Rebalance ---")
-    logger.info("Closing all existing positions and orders before finding new opportunity...")
-    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, timeout_seconds=900)
-    time.sleep(15)  # Allow time for balance updates after closing positions.
 
     # 1. Find all opportunities.
     opportunities = fetch_and_compare_funding_rates(
@@ -257,7 +254,12 @@ def perform_hourly_rebalance(
         )
         return
 
-    # 5. Execute the trade.
+    # 5. Close all open positions and orders
+    logger.info("Closing all existing positions and orders before finding new opportunity...")
+    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, timeout_seconds=900)
+    time.sleep(15)  # Allow time for balance updates after closing positions.
+
+    # 6. Execute the trade.
     execute_strategy(aster_client, hyperliquid_client, decision)
 
 

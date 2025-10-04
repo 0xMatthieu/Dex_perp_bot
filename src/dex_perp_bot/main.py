@@ -57,7 +57,7 @@ def main() -> int:
     try:
         while True:
             TRADE_WINDOW_START_MINUTE = 10
-            TRADE_WINDOW_END_MINUTE = 40
+            TRADE_WINDOW_END_MINUTE = 50
             try:
                 # Always report status on each loop iteration
                 report_portfolio_status(aster_client, hyperliquid_client)
