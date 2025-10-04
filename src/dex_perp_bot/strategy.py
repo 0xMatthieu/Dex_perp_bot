@@ -305,7 +305,7 @@ def perform_hourly_rebalance(
 
     if _is_portfolio_matching_opportunity(hl_positions, aster_positions, best_opp):
         logger.info("Already in optimal position for imminent funding. Holding position.")
-        return
+        #return
 
     # 4. Calculate the new trade.
     decision = _calculate_trade_decision(
