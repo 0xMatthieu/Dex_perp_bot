@@ -231,35 +231,12 @@ def perform_hourly_rebalance(
         logger.error("Failed to calculate trade decision. Aborting rebalance.")
         return
 
-    # 4. Check for favorable spread before execution.
-    long_venue_client = aster_client if best_opp.long_venue == "Aster" else hyperliquid_client
-    short_venue_client = hyperliquid_client if best_opp.long_venue == "Aster" else aster_client
-    price_long = long_venue_client.get_price(decision.long_symbol)
-    price_short = short_venue_client.get_price(decision.short_symbol)
-
-    spread = price_short - price_long
-    spread_pct = (spread / price_long) * 100 if price_long else Decimal("0")
-
-    logger.info(
-        f"Entering position with spread: "
-        f"Short Price ({decision.short_symbol}): ${price_short:.4f}, "
-        f"Long Price ({decision.long_symbol}): ${price_long:.4f}. "
-        f"Spread: {spread_pct:.4f}%"
-    )
-
-    if spread_pct < min_spread_pct:
-        logger.warning(
-            f"Spread of {spread_pct:.4f}% is below the minimum required {min_spread_pct:.4f}%. "
-            f"Aborting trade execution."
-        )
-        return
-
-    # 5. Close all open positions and orders
+    # 4. Close all open positions and orders
     logger.info("Closing all existing positions and orders before finding new opportunity...")
     cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, timeout_seconds=900)
     time.sleep(15)  # Allow time for balance updates after closing positions.
 
-    # 6. Execute the trade.
+    # 5. Execute the trade.
     execute_strategy(aster_client, hyperliquid_client, decision)
 
 
