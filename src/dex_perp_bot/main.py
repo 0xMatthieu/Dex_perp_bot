@@ -56,8 +56,8 @@ def main() -> int:
 
     try:
         while True:
-            TRADE_WINDOW_START_MINUTE = 10
-            TRADE_WINDOW_END_MINUTE = 50
+            TRADE_WINDOW_START_MINUTE = 5
+            TRADE_WINDOW_END_MINUTE = 55
             try:
                 # Always report status on each loop iteration
                 report_portfolio_status(aster_client, hyperliquid_client)
@@ -72,7 +72,7 @@ def main() -> int:
                     capital_allocation_pct = Decimal("0.9")
                     min_apy_diff_pct = Decimal("0")  # Minimum APY difference to consider a trade
                     min_spread_pct = Decimal("0")  # Minimum price spread to enter a trade
-                    spread_ticks = 2  # Number of ticks for spread on entry/exit
+                    spread_ticks = 3  # Number of ticks for spread on entry/exit
 
                     balance_hl = hyperliquid_client.get_wallet_balance().available or Decimal("0")
                     balance_aster = aster_client.get_wallet_balance().available or Decimal("0")
