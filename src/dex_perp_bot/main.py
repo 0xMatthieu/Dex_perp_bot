@@ -74,8 +74,8 @@ def main() -> int:
                     min_spread_pct = Decimal("0")  # Minimum price spread to enter a trade
                     spread_ticks = 3  # Number of ticks for spread on entry/exit
 
-                    balance_hl = hyperliquid_client.get_wallet_balance().available or Decimal("0")
-                    balance_aster = aster_client.get_wallet_balance().available or Decimal("0")
+                    balance_hl = hyperliquid_client.get_wallet_balance().total or Decimal("0")
+                    balance_aster = aster_client.get_wallet_balance().total or Decimal("0")
                     available_capital = min(balance_hl, balance_aster)
                     capital_to_deploy = available_capital * capital_allocation_pct
 
