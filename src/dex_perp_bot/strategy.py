@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from .funding import FundingComparison, fetch_and_compare_funding_rates
@@ -84,6 +84,12 @@ class StrategyDecision:
     short_symbol: str
     margin: Decimal
     leverage: int
+    # NEW fields for spread-based entry
+    long_limit_price: Decimal
+    short_limit_price: Decimal
+    prefer_post_only: bool
+    spread_ticks: Optional[int]
+    spread_bps: Optional[Decimal]
 
 
 def _is_portfolio_matching_opportunity(
@@ -125,15 +131,52 @@ def _is_portfolio_matching_opportunity(
         return aster_side == 'long' and hl_side == 'short'
 
 
+def round_qty_down(quantity: Decimal, step: Decimal) -> Decimal:
+    """Rounds a quantity down to the nearest multiple of step_size."""
+    if step.is_zero():
+        return quantity
+    return (quantity // step) * step
+
+
+def floor_to_step(value: Decimal, step: Decimal) -> Decimal:
+    """Rounds a value down to the nearest multiple of step_size (e.g., tick_size)."""
+    if step.is_zero():
+        return value
+    return (value / step).to_integral_value(rounding=ROUND_FLOOR) * step
+
+
+def ceil_to_step(value: Decimal, step: Decimal) -> Decimal:
+    """Rounds a value up to the nearest multiple of step_size."""
+    if step.is_zero():
+        return value
+    return (value / step).to_integral_value(rounding=ROUND_CEILING) * step
+
+
+def compute_spread_abs(
+    price: Decimal,
+    tick: Decimal,
+    *,
+    spread_ticks: Optional[int],
+    spread_bps: Optional[Decimal],
+) -> Decimal:
+    """Computes the absolute spread amount from ticks and/or basis points."""
+    spread_from_ticks = Decimal(spread_ticks or 0) * tick
+    spread_from_bps = (spread_bps or Decimal(0)) * price
+    return max(spread_from_ticks, spread_from_bps)
+
+
 def _calculate_trade_decision(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
     best_opp: FundingComparison,
     leverage: int,
     capital_usd: Decimal,
+    *,
+    spread_ticks: Optional[int] = 1,
+    spread_bps: Optional[Decimal] = None,
 ) -> Optional[StrategyDecision]:
-    """Calculates the quantities and details for a given strategy opportunity."""
-    # 1. Prepare symbols and clients for the chosen opportunity
+    """Calculates quantities and post-only entry prices for a given opportunity."""
+    # 1. Symbols and which venue is long/short
     symbol_base = best_opp.symbol
     symbol_hl = f"{symbol_base}/USDC:USDC"
     symbol_aster = f"{symbol_base}USDT"
@@ -144,39 +187,66 @@ def _calculate_trade_decision(
     long_symbol = symbol_aster if isinstance(long_venue_client, AsterClient) else symbol_hl
     short_symbol = symbol_aster if isinstance(short_venue_client, AsterClient) else symbol_hl
 
-    # 2. Get prices and filters for sizing
+    # 2. Prices and tick/lot sizes
     logger.info("Fetching prices and exchange info for sizing...")
     price_long = long_venue_client.get_price(long_symbol)
     price_short = short_venue_client.get_price(short_symbol)
 
-    # 3. Calculate quantities based on capital and leverage
+    # Long side increments
+    if isinstance(long_venue_client, AsterClient):
+        lf = long_venue_client.get_symbol_filters(long_symbol)
+        long_tick = lf["tick_size"]
+        long_step = lf["step_size"]
+    else:  # Hyperliquid
+        lmk = long_venue_client._client.market(long_symbol)
+        long_step = Decimal(str(lmk["precision"]["amount"]))
+        if "limits" in lmk and lmk["limits"].get("price", {}).get("min"):
+            long_tick = Decimal(str(lmk["limits"]["price"]["min"]))
+        else:
+            long_tick = Decimal("1") / (Decimal(10) ** Decimal(lmk["precision"]["price"]))
+
+    # Short side increments
+    if isinstance(short_venue_client, AsterClient):
+        sf = short_venue_client.get_symbol_filters(short_symbol)
+        short_tick = sf["tick_size"]
+        short_step = sf["step_size"]
+    else:  # Hyperliquid
+        smk = short_venue_client._client.market(short_symbol)
+        short_step = Decimal(str(smk["precision"]["amount"]))
+        if "limits" in smk and smk["limits"].get("price", {}).get("min"):
+            short_tick = Decimal(str(smk["limits"]["price"]["min"]))
+        else:
+            short_tick = Decimal("1") / (Decimal(10) ** Decimal(smk["precision"]["price"]))
+
+    # 3. Quantities based on capital & leverage
     notional_value = capital_usd * Decimal(leverage)
     qty_long = notional_value / price_long
     qty_short = notional_value / price_short
 
-    # 4. Round quantities to exchange-specific lot sizes
-    if isinstance(long_venue_client, AsterClient):
-        filters = long_venue_client.get_symbol_filters(long_symbol)
-        step_size = filters['step_size']
-        qty_long = (qty_long // step_size) * step_size
-    else:  # Hyperliquid
-        market = long_venue_client._client.market(long_symbol)
-        step_size = Decimal(str(market['precision']['amount']))
-        qty_long = (qty_long // step_size) * step_size
+    # 4. Round quantities to lot steps
+    qty_long = round_qty_down(qty_long, long_step)
+    qty_short = round_qty_down(qty_short, short_step)
 
-    if isinstance(short_venue_client, AsterClient):
-        filters = short_venue_client.get_symbol_filters(short_symbol)
-        step_size = filters['step_size']
-        qty_short = (qty_short // step_size) * step_size
-    else:  # Hyperliquid
-        market = short_venue_client._client.market(short_symbol)
-        step_size = Decimal(str(market['precision']['amount']))
-        qty_short = (qty_short // step_size) * step_size
-
-    if qty_long == 0 or qty_short == 0:
+    if qty_long <= 0 or qty_short <= 0:
         logger.error("Calculated quantity is zero. Increase capital or leverage.")
         return None
 
+    # 5. Compute post-only limit prices with spread bias
+    long_spread_abs = compute_spread_abs(price_long, long_tick, spread_ticks=spread_ticks, spread_bps=spread_bps)
+    short_spread_abs = compute_spread_abs(price_short, short_tick, spread_ticks=spread_ticks, spread_bps=spread_bps)
+
+    # Long leg (BUY): place below current price -> floor
+    long_limit_price = floor_to_step(price_long - long_spread_abs, long_tick)
+    # Short leg (SELL): place above current price -> ceil
+    short_limit_price = ceil_to_step(price_short + short_spread_abs, short_tick)
+
+    # Safety: ensure prices moved at least 1 tick to the passive side
+    if long_limit_price >= price_long:
+        long_limit_price = floor_to_step(price_long - long_tick, long_tick)
+    if short_limit_price <= price_short:
+        short_limit_price = ceil_to_step(price_short + short_tick, short_tick)
+
+    # 6. Return decision incl. post-only target prices
     return StrategyDecision(
         opportunity=best_opp,
         long_qty=qty_long,
@@ -185,6 +255,11 @@ def _calculate_trade_decision(
         short_symbol=short_symbol,
         margin=capital_usd,
         leverage=leverage,
+        long_limit_price=long_limit_price,
+        short_limit_price=short_limit_price,
+        prefer_post_only=True,
+        spread_ticks=spread_ticks,
+        spread_bps=spread_bps,
     )
 
 
@@ -234,7 +309,13 @@ def perform_hourly_rebalance(
 
     # 4. Calculate the new trade.
     decision = _calculate_trade_decision(
-        aster_client, hyperliquid_client, best_opp, effective_leverage, capital_usd
+        aster_client,
+        hyperliquid_client,
+        best_opp,
+        effective_leverage,
+        capital_usd,
+        spread_ticks=1,  # Place limit order 1 tick away from the passive side
+        spread_bps=None,
     )
     if not decision:
         logger.error("Failed to calculate trade decision. Aborting rebalance.")
@@ -273,13 +354,18 @@ def execute_strategy(
     long_qty = decision.long_qty if isinstance(long_venue_client, AsterClient) else float(decision.long_qty)
     short_qty = decision.short_qty if isinstance(short_venue_client, AsterClient) else float(decision.short_qty)
 
+    long_price = decision.long_limit_price if isinstance(long_venue_client, AsterClient) else float(decision.long_limit_price)
+    short_price = decision.short_limit_price if isinstance(short_venue_client, AsterClient) else float(decision.short_limit_price)
+
     long_order_res = long_venue_client.place_order(
-        symbol=decision.long_symbol, side="BUY", order_type="MAKER_TAKER", quantity=long_qty
+        symbol=decision.long_symbol, side="BUY", order_type="MAKER_TAKER",
+        quantity=long_qty, price=long_price,
     )
     logger.info(f"Long order ({decision.opportunity.long_venue}) response: {long_order_res}")
 
     short_order_res = short_venue_client.place_order(
-        symbol=decision.short_symbol, side="SELL", order_type="MAKER_TAKER", quantity=short_qty
+        symbol=decision.short_symbol, side="SELL", order_type="MAKER_TAKER",
+        quantity=short_qty, price=short_price,
     )
     logger.info(f"Short order ({decision.opportunity.short_venue}) response: {short_order_res}")
 

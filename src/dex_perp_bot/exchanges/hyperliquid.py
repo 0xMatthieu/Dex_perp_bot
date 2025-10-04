@@ -142,17 +142,20 @@ class HyperliquidClient:
             try:
                 logger.info(f"Attempting to open {symbol} with post-only limit order.")
                 market_info = self._client.market(symbol)
-                tick_size = Decimal(str(market_info['precision']['price']))
                 step_size = Decimal(str(market_info['precision']['amount']))
 
-                order_book = self._client.fetch_order_book(symbol)
-                if not order_book.get("bids") or not order_book.get("asks"):
-                    raise DexAPIError(f"Order book for {symbol} is empty.")
+                if price:
+                    limit_price = Decimal(str(price))
+                else:
+                    tick_size = Decimal(str(market_info['precision']['price']))
+                    order_book = self._client.fetch_order_book(symbol)
+                    if not order_book.get("bids") or not order_book.get("asks"):
+                        raise DexAPIError(f"Order book for {symbol} is empty.")
 
-                best_bid = Decimal(str(order_book["bids"][0][0]))
-                best_ask = Decimal(str(order_book["asks"][0][0]))
+                    best_bid = Decimal(str(order_book["bids"][0][0]))
+                    best_ask = Decimal(str(order_book["asks"][0][0]))
 
-                limit_price = (best_bid - tick_size) if side.lower() == "buy" else (best_ask + tick_size)
+                    limit_price = (best_bid - tick_size) if side.lower() == "buy" else (best_ask + tick_size)
                 qty_rounded = float((Decimal(str(quantity)) // step_size) * step_size)
                 if qty_rounded == 0:
                     raise ValueError(f"Quantity {quantity} rounded to zero with step size {step_size}")

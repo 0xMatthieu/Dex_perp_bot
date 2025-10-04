@@ -229,15 +229,18 @@ class AsterClient:
             # --- 1. Attempt Post-Only Limit Order ---
             try:
                 logger.info(f"Attempting to open {symbol} with post-only limit order.")
-                order_book = self._get_order_book(symbol)
-                if not order_book.get("bids") or not order_book.get("asks"):
-                    raise DexAPIError(f"Order book for {symbol} is empty, cannot place limit order.")
+                if price:
+                    limit_price = Decimal(str(price))
+                else:
+                    order_book = self._get_order_book(symbol)
+                    if not order_book.get("bids") or not order_book.get("asks"):
+                        raise DexAPIError(f"Order book for {symbol} is empty, cannot place limit order.")
 
-                best_bid = Decimal(order_book["bids"][0][0])
-                best_ask = Decimal(order_book["asks"][0][0])
+                    best_bid = Decimal(order_book["bids"][0][0])
+                    best_ask = Decimal(order_book["asks"][0][0])
 
-                # Place one tick past the passive side of the book to be a maker
-                limit_price = (best_bid - tick_size) if side.upper() == "BUY" else (best_ask + tick_size)
+                    # Place one tick past the passive side of the book to be a maker
+                    limit_price = (best_bid - tick_size) if side.upper() == "BUY" else (best_ask + tick_size)
 
                 price_precision = -tick_size.normalize().as_tuple().exponent
                 price_str = f"{limit_price:.{price_precision}f}"
