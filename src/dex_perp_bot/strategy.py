@@ -207,7 +207,7 @@ def perform_hourly_rebalance(
         aster_client, hyperliquid_client, imminent_funding_minutes=60 # Use a wide window
     )
     actionable_opportunities = [
-        opp for opp in opportunities if opp.is_actionable and opp.apy_difference > min_apy_diff_pct
+        opp for opp in opportunities if opp.is_actionable and abs(opp.apy_difference) > min_apy_diff_pct
     ]
 
     if not actionable_opportunities:
