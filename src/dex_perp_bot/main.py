@@ -72,6 +72,7 @@ def main() -> int:
                     capital_allocation_pct = Decimal("0.9")
                     min_apy_diff_pct = Decimal("0")  # Minimum APY difference to consider a trade
                     min_spread_pct = Decimal("0")  # Minimum price spread to enter a trade
+                    spread_ticks = 2  # Number of ticks for spread on entry/exit
 
                     balance_hl = hyperliquid_client.get_wallet_balance().available or Decimal("0")
                     balance_aster = aster_client.get_wallet_balance().available or Decimal("0")
@@ -93,6 +94,7 @@ def main() -> int:
                             capital_usd=capital_to_deploy,
                             min_apy_diff_pct=min_apy_diff_pct,
                             min_spread_pct=min_spread_pct,
+                            spread_ticks=spread_ticks,
                         )
                     else:
                         logger.warning("Insufficient capital to deploy. Awaiting next cycle.")
