@@ -176,7 +176,7 @@ def fetch_and_compare_funding_rates(
         hyperliquid_rate = hyperliquid_rates[symbol]
 
         # Check for imminent funding on either exchange.
-        aster_funding_imminent = False
+        aster_funding_imminent = True
         if aster_rate.next_funding_time_ms:
             time_diff_ms = aster_rate.next_funding_time_ms - current_time_ms
             if 0 < time_diff_ms <= minutes_to_ms:
@@ -242,7 +242,7 @@ def fetch_and_compare_funding_rates(
                     long_max_leverage=None, short_max_leverage=None, is_actionable=False,
                 ))
     # Sort by the highest APY difference
-    sorted_comparisons = sorted(comparisons, key=lambda x: x.apy_difference, reverse=True)
+    sorted_comparisons = sorted(comparisons, key=lambda x: abs(x.apy_difference), reverse=True)
 
     top_opportunities = sorted_comparisons[:4]
 
