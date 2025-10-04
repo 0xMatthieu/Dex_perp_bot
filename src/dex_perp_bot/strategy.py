@@ -35,7 +35,7 @@ def report_portfolio_status(
         # Process Hyperliquid positions
         for pos in hl_positions:
             symbol_base = pos.get("symbol", "").split('/')[0]
-            pnl = Decimal(pos.get("info", {}).get("unrealizedPnl", "0"))
+            pnl = Decimal(pos.get("unrealizedPnl", "0"))
             total_pnl += pnl
             logger.info(
                 f"Hyperliquid Position: {pos.get('symbol')} | Size: {pos.get('contracts')} | "
