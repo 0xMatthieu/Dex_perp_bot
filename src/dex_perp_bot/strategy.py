@@ -223,7 +223,16 @@ def perform_hourly_rebalance(
     logger.info(f"Selected best opportunity: {best_opp}")
     logger.info(f"Effective leverage set to {effective_leverage}x.")
 
-    # 3. Calculate the new trade.
+    # 3. Check if the current portfolio already matches the best opportunity.
+    hl_positions = hyperliquid_client.get_all_positions()
+    aster_positions = aster_client.get_all_positions()
+    logger.info(f"Current positions: Hyperliquid={hl_positions}, Aster={aster_positions}")
+
+    if _is_portfolio_matching_opportunity(hl_positions, aster_positions, best_opp):
+        logger.info("Already in optimal position for imminent funding. Holding position.")
+        return
+
+    # 4. Calculate the new trade.
     decision = _calculate_trade_decision(
         aster_client, hyperliquid_client, best_opp, effective_leverage, capital_usd
     )
@@ -231,12 +240,12 @@ def perform_hourly_rebalance(
         logger.error("Failed to calculate trade decision. Aborting rebalance.")
         return
 
-    # 4. Close all open positions and orders
+    # 5. Close all open positions and orders
     logger.info("Closing all existing positions and orders before finding new opportunity...")
     cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, timeout_seconds=900)
     time.sleep(15)  # Allow time for balance updates after closing positions.
 
-    # 5. Execute the trade.
+    # 6. Execute the trade.
     execute_strategy(aster_client, hyperliquid_client, decision)
 
 
