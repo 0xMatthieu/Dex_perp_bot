@@ -314,7 +314,7 @@ def perform_hourly_rebalance(
         best_opp,
         effective_leverage,
         capital_usd,
-        spread_ticks=1,  # Place limit order 1 tick away from the passive side
+        spread_ticks=2,  # Place limit order 1 tick away from the passive side
         spread_bps=None,
     )
     if not decision:
