@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from .funding import FundingComparison, fetch_and_compare_funding_rates
@@ -14,6 +14,64 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+
+def report_portfolio_status(
+    aster_client: AsterClient,
+    hyperliquid_client: HyperliquidClient,
+) -> None:
+    """Fetches and logs PNL, size, and price spread for current positions."""
+    logger.info("--- Current Portfolio Status ---")
+    try:
+        hl_positions = hyperliquid_client.get_all_positions()
+        aster_positions = aster_client.get_all_positions()
+
+        if not hl_positions and not aster_positions:
+            logger.info("No open positions on either exchange.")
+            return
+
+        total_pnl = Decimal("0")
+
+        # Process Hyperliquid positions
+        for pos in hl_positions:
+            symbol_base = pos.get("symbol", "").split('/')[0]
+            pnl = Decimal(pos.get("info", {}).get("unrealizedPnl", "0"))
+            total_pnl += pnl
+            logger.info(
+                f"Hyperliquid Position: {pos.get('symbol')} | Size: {pos.get('contracts')} | "
+                f"Side: {pos.get('side')} | PNL: ${pnl:.4f}"
+            )
+
+        # Process Aster positions
+        for pos in aster_positions:
+            symbol_base = pos.get("symbol", "").replace("USDT", "")
+            try:
+                pnl = Decimal(pos.get("unrealizedProfit", "0"))
+                total_pnl += pnl
+                logger.info(
+                    f"Aster Position: {pos.get('symbol')} | Size: {pos.get('positionAmt')} | PNL: ${pnl:.4f}"
+                )
+            except InvalidOperation:
+                logger.warning(f"Could not parse PNL for Aster position: {pos}")
+
+        logger.info(f"Total Unrealized PNL: ${total_pnl:.4f}")
+
+        # Calculate and log price spread if in a delta-neutral position
+        if len(hl_positions) == 1 and len(aster_positions) == 1:
+            hl_symbol = hl_positions[0].get('symbol')
+            aster_symbol = aster_positions[0].get('symbol')
+            if hl_symbol and aster_symbol:
+                price_hl = hyperliquid_client.get_price(hl_symbol)
+                price_aster = aster_client.get_price(aster_symbol)
+                spread = price_aster - price_hl
+                spread_pct = (spread / price_hl) * 100 if price_hl else Decimal("0")
+                logger.info(
+                    f"Price Spread ({aster_symbol}): Aster=${price_aster:.4f}, HL=${price_hl:.4f} | "
+                    f"Delta: ${spread:.4f} ({spread_pct:.4f}%)"
+                )
+
+    except Exception as exc:
+        logger.error(f"Failed to generate portfolio status report: {exc}")
 
 
 @dataclass(frozen=True)
@@ -130,71 +188,77 @@ def _calculate_trade_decision(
     )
 
 
-def run_arbitrage_strategy(
+def perform_hourly_rebalance(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
     leverage: int,
     capital_usd: Decimal,
-    min_apy_diff_pct: Decimal = Decimal("0"),
-    interval_minutes: int = 5,
-    trigger_execution = False,
+    min_apy_diff_pct: Decimal,
+    min_spread_pct: Decimal,
 ) -> None:
     """
-    Main strategy function to find and act on imminent funding rate opportunities.
-    It will rebalance the portfolio to match the best opportunity if not already aligned.
+    Main strategy function to rebalance the portfolio hourly to the best opportunity.
+    It closes existing positions and opens a new one based on funding and spread.
     """
-    # 1. Find all actionable funding opportunities that meet the APY threshold.
+    logger.info("--- Performing Hourly Rebalance ---")
+    logger.info("Closing all existing positions and orders before finding new opportunity...")
+    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, timeout_seconds=900)
+    time.sleep(15)  # Allow time for balance updates after closing positions.
+
+    # 1. Find all opportunities.
     opportunities = fetch_and_compare_funding_rates(
-        aster_client, hyperliquid_client, imminent_funding_minutes=interval_minutes
+        aster_client, hyperliquid_client, imminent_funding_minutes=60 # Use a wide window
     )
     actionable_opportunities = [
-        opp for opp in opportunities if opp.funding_is_imminent and opp.apy_difference > min_apy_diff_pct and opp.is_actionable
+        opp for opp in opportunities if opp.is_actionable and opp.apy_difference > min_apy_diff_pct
     ]
 
-    if trigger_execution == True:
-        actionable_opportunities = opportunities
-
-    if not actionable_opportunities and trigger_execution == False:
-        logger.info("No actionable funding opportunities found. Holding existing positions.")
+    if not actionable_opportunities:
+        logger.info("No actionable opportunities found meeting the minimum APY difference criteria. Waiting for next cycle.")
         return
 
-    best_opp = actionable_opportunities[0]  # Already sorted and filtered
+    best_opp = actionable_opportunities[0]
 
-    # 2. Determine effective leverage based on pre-fetched exchange limits.
-    # The 'or 1' is a safeguard in case max leverage is None, though it shouldn't be for actionable opps.
+    # 2. Determine effective leverage.
     effective_leverage = min(
         leverage, best_opp.long_max_leverage or 1, best_opp.short_max_leverage or 1
     )
-    logger.info(f"Selected best actionable opportunity: {best_opp}")
+    logger.info(f"Selected best opportunity: {best_opp}")
     logger.info(f"Effective leverage set to {effective_leverage}x.")
 
-    # 3. Check if the current portfolio already matches the best opportunity.
-    hl_positions = hyperliquid_client.get_all_positions()
-    aster_positions = aster_client.get_all_positions()
-    logger.info(f"Current positions: Hyperliquid={hl_positions}, Aster={aster_positions}")
-
-    if _is_portfolio_matching_opportunity(hl_positions, aster_positions, best_opp):
-        logger.info("Already in optimal position for imminent funding. Holding position.")
-        return
-
-    # 4. If not in the optimal position, rebalance.
-    logger.info("Portfolio does not match optimal strategy. Rebalancing.")
-
-
-    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, interval_minutes= interval_minutes * 3 / 4)
-
-    # wait a little bit to let wallet balance refresh
-    time.sleep(30)
-
-    # 5. Calculate the new trade and execute it.
+    # 3. Calculate the new trade.
     decision = _calculate_trade_decision(
         aster_client, hyperliquid_client, best_opp, effective_leverage, capital_usd
     )
+    if not decision:
+        logger.error("Failed to calculate trade decision. Aborting rebalance.")
+        return
 
-    if decision:
-        execute_strategy(aster_client, hyperliquid_client, decision)
-    else:
-        logger.error("Failed to calculate trade decision after deciding to rebalance.")
+    # 4. Check for favorable spread before execution.
+    long_venue_client = aster_client if best_opp.long_venue == "Aster" else hyperliquid_client
+    short_venue_client = hyperliquid_client if best_opp.long_venue == "Aster" else aster_client
+    price_long = long_venue_client.get_price(decision.long_symbol)
+    price_short = short_venue_client.get_price(decision.short_symbol)
+
+    spread = price_short - price_long
+    spread_pct = (spread / price_long) * 100 if price_long else Decimal("0")
+
+    logger.info(
+        f"Entering position with spread: "
+        f"Short Price ({decision.short_symbol}): ${price_short:.4f}, "
+        f"Long Price ({decision.long_symbol}): ${price_long:.4f}. "
+        f"Spread: {spread_pct:.4f}%"
+    )
+
+    if spread_pct < min_spread_pct:
+        logger.warning(
+            f"Spread of {spread_pct:.4f}% is below the minimum required {min_spread_pct:.4f}%. "
+            f"Aborting trade execution."
+        )
+        return
+
+    # 5. Execute the trade.
+    execute_strategy(aster_client, hyperliquid_client, decision)
 
 
 def execute_strategy(
@@ -257,7 +321,7 @@ def execute_strategy(
 def cleanup_all_open_positions_and_orders(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
-    interval_minutes: int = 5,
+    timeout_seconds: int = 900,
 ) -> None:
     """
     Cleans up by cancelling all open orders and closing all open positions.
@@ -337,7 +401,6 @@ def cleanup_all_open_positions_and_orders(
     # 3. Verify all positions are closed before proceeding.
     logger.info("Verifying all positions are closed...")
     start_time = time.time()
-    timeout_seconds = interval_minutes * 60
     while time.time() - start_time < timeout_seconds:
         try:
             hl_positions = hyperliquid_client.get_all_positions()

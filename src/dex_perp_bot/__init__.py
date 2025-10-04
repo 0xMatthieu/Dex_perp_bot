@@ -2,7 +2,7 @@
 
 from .config import Settings, HyperliquidCredentials, AsterCredentials, AsterConfig
 from .funding import fetch_and_compare_funding_rates
-from .strategy import run_arbitrage_strategy, execute_strategy, cleanup_all_open_positions_and_orders
+from .strategy import perform_hourly_rebalance, execute_strategy, cleanup_all_open_positions_and_orders, report_portfolio_status
 
 __all__ = [
     "Settings",
@@ -10,7 +10,8 @@ __all__ = [
     "AsterCredentials",
     "AsterConfig",
     "fetch_and_compare_funding_rates",
-    "run_arbitrage_strategy",
+    "perform_hourly_rebalance",
     "execute_strategy",
     "cleanup_all_open_positions_and_orders",
+    "report_portfolio_status",
 ]
