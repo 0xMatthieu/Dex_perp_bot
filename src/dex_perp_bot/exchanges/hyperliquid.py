@@ -299,7 +299,7 @@ class HyperliquidClient:
         except Exception as exc:
             raise DexAPIError(f"Failed to cancel Hyperliquid order {order_id}") from exc
 
-    def close_position(self, symbol: str) -> Dict[str, Any]:
+    def close_position(self, symbol: str, spread_ticks: int = 1) -> Dict[str, Any]:
         """
         Close an open position for a given symbol on Hyperliquid.
         Tries a post-only limit order first, falling back to a market order.
@@ -339,8 +339,8 @@ class HyperliquidClient:
             best_bid = Decimal(str(order_book["bids"][0][0]))
             best_ask = Decimal(str(order_book["asks"][0][0]))
 
-            # Place one tick inside the passive side of the book
-            limit_price = (best_ask - tick_size) if close_side == "sell" else (best_bid + tick_size)
+            # Place order inside the spread to capture it
+            limit_price = (best_ask - (tick_size * spread_ticks)) if close_side == "sell" else (best_bid + (tick_size * spread_ticks))
 
             logger.info(f"Placing post-only LIMIT {close_side} order for {size_to_close} of {symbol} at {limit_price}")
             order_response = self._client.create_order(

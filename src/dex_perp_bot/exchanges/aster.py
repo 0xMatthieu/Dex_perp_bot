@@ -521,7 +521,7 @@ class AsterClient:
                 return position
         return None
 
-    def close_position(self, symbol: str) -> Dict[str, Any]:
+    def close_position(self, symbol: str, spread_ticks: int = 1) -> Dict[str, Any]:
         """
         Close an open position for a given symbol on Aster.
         Tries a post-only limit order first, falling back to a stop-market order.
@@ -558,8 +558,8 @@ class AsterClient:
             best_bid = Decimal(order_book["bids"][0][0])
             best_ask = Decimal(order_book["asks"][0][0])
 
-            # Place one tick inside the passive side of the book
-            limit_price = (best_ask - tick_size) if close_side == "SELL" else (best_bid + tick_size)
+            # Place order inside the spread to capture it
+            limit_price = (best_ask - (tick_size * spread_ticks)) if close_side == "SELL" else (best_bid + (tick_size * spread_ticks))
 
             price_precision = -tick_size.normalize().as_tuple().exponent
             price_str = f"{limit_price:.{price_precision}f}"

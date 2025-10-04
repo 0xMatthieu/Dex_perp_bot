@@ -323,7 +323,9 @@ def perform_hourly_rebalance(
 
     # 5. Close all open positions and orders
     logger.info("Closing all existing positions and orders before finding new opportunity...")
-    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, timeout_seconds=900)
+    cleanup_all_open_positions_and_orders(
+        aster_client, hyperliquid_client, timeout_seconds=900, close_spread_ticks=1
+    )
     time.sleep(15)  # Allow time for balance updates after closing positions.
 
     # 6. Execute the trade.
@@ -396,6 +398,7 @@ def cleanup_all_open_positions_and_orders(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
     timeout_seconds: int = 900,
+    close_spread_ticks: int = 1,
 ) -> None:
     """
     Cleans up by cancelling all open orders and closing all open positions.
@@ -448,7 +451,7 @@ def cleanup_all_open_positions_and_orders(
                 symbol = pos.get("symbol")
                 if symbol:
                     try:
-                        aster_client.close_position(symbol)
+                        aster_client.close_position(symbol, spread_ticks=close_spread_ticks)
                     except Exception as exc:
                         logger.error(f"Failed to close position for {symbol} on Aster: {exc}")
         else:
@@ -464,7 +467,7 @@ def cleanup_all_open_positions_and_orders(
                 symbol = pos.get("symbol")
                 if symbol:
                     try:
-                        hyperliquid_client.close_position(symbol)
+                        hyperliquid_client.close_position(symbol, spread_ticks=close_spread_ticks)
                     except Exception as exc:
                         logger.error(f"Failed to close position for {symbol} on Hyperliquid: {exc}")
         else:
