@@ -56,13 +56,15 @@ def main() -> int:
 
     try:
         while True:
+            TRADE_WINDOW_START_MINUTE = 10
+            TRADE_WINDOW_END_MINUTE = 40
             try:
                 # Always report status on each loop iteration
                 report_portfolio_status(aster_client, hyperliquid_client)
 
                 now = datetime.now()
                 # Trading window is between 10 and 40 minutes past the hour.
-                if now.hour != last_trade_hour and 10 <= now.minute <= 40:
+                if now.hour != last_trade_hour and TRADE_WINDOW_START_MINUTE <= now.minute <= TRADE_WINDOW_END_MINUTE:
                     last_trade_hour = now.hour
                     logger.info(f"--- Entering trading window for hour {now.hour} ---")
 
@@ -101,8 +103,8 @@ def main() -> int:
             # --- Wait until the next check/action window ---
             now = datetime.now()
             # Default next run is the start of the next trading window (HH:10)
-            next_run_time = now.replace(minute=10, second=0, microsecond=0)
-            if now.minute >= 10:
+            next_run_time = now.replace(minute=TRADE_WINDOW_START_MINUTE, second=0, microsecond=0)
+            if now.minute >= TRADE_WINDOW_START_MINUTE:
                 # If we're already in or past this hour's window, target the next hour.
                 next_run_time += timedelta(hours=1)
 
