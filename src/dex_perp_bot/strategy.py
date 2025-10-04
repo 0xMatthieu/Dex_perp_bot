@@ -207,7 +207,7 @@ def _calculate_trade_decision(
         if "limits" in lmk and lmk["limits"].get("price", {}).get("min"):
             long_tick = Decimal(str(lmk["limits"]["price"]["min"]))
         else:
-            long_tick = Decimal("1") / (Decimal(10) ** Decimal(lmk["precision"]["price"]))
+            long_tick = Decimal(str(lmk["precision"]["price"]))
         logger.info(f"[{long_symbol}] Hyperliquid Increments: Tick={long_tick}, Step={long_step} (from precision: {lmk.get('precision')})")
 
     # Short side increments
@@ -222,7 +222,7 @@ def _calculate_trade_decision(
         if "limits" in smk and smk["limits"].get("price", {}).get("min"):
             short_tick = Decimal(str(smk["limits"]["price"]["min"]))
         else:
-            short_tick = Decimal("1") / (Decimal(10) ** Decimal(smk["precision"]["price"]))
+            short_tick = Decimal(str(smk["precision"]["price"]))
         logger.info(f"[{short_symbol}] Hyperliquid Increments: Tick={short_tick}, Step={short_step} (from precision: {smk.get('precision')})")
 
     # 3. Quantities based on capital & leverage
