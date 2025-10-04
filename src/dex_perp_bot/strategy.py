@@ -179,6 +179,8 @@ def run_arbitrage_strategy(
 
     # 4. If not in the optimal position, rebalance.
     logger.info("Portfolio does not match optimal strategy. Rebalancing.")
+
+
     cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, interval_minutes= interval_minutes * 3 / 4)
 
     # wait a little bit to let wallet balance refresh
