@@ -176,7 +176,7 @@ def fetch_and_compare_funding_rates(
         hyperliquid_rate = hyperliquid_rates[symbol]
 
         # Check for imminent funding on either exchange.
-        aster_funding_imminent = True
+        aster_funding_imminent = False
         if aster_rate.next_funding_time_ms:
             time_diff_ms = aster_rate.next_funding_time_ms - current_time_ms
             if 0 < time_diff_ms <= minutes_to_ms:
