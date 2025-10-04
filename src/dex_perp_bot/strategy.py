@@ -188,15 +188,19 @@ def _calculate_trade_decision(
     short_symbol = symbol_aster if isinstance(short_venue_client, AsterClient) else symbol_hl
 
     # 2. Prices and tick/lot sizes
+    logger.info("--- Calculating Trade Decision ---")
     logger.info("Fetching prices and exchange info for sizing...")
     price_long = long_venue_client.get_price(long_symbol)
     price_short = short_venue_client.get_price(short_symbol)
+    logger.info(f"[{long_symbol}] Mark Price (Long): {price_long}")
+    logger.info(f"[{short_symbol}] Mark Price (Short): {price_short}")
 
     # Long side increments
     if isinstance(long_venue_client, AsterClient):
         lf = long_venue_client.get_symbol_filters(long_symbol)
         long_tick = lf["tick_size"]
         long_step = lf["step_size"]
+        logger.info(f"[{long_symbol}] Aster Increments: Tick={long_tick}, Step={long_step}")
     else:  # Hyperliquid
         lmk = long_venue_client._client.market(long_symbol)
         long_step = Decimal(str(lmk["precision"]["amount"]))
@@ -204,12 +208,14 @@ def _calculate_trade_decision(
             long_tick = Decimal(str(lmk["limits"]["price"]["min"]))
         else:
             long_tick = Decimal("1") / (Decimal(10) ** Decimal(lmk["precision"]["price"]))
+        logger.info(f"[{long_symbol}] Hyperliquid Increments: Tick={long_tick}, Step={long_step} (from precision: {lmk.get('precision')})")
 
     # Short side increments
     if isinstance(short_venue_client, AsterClient):
         sf = short_venue_client.get_symbol_filters(short_symbol)
         short_tick = sf["tick_size"]
         short_step = sf["step_size"]
+        logger.info(f"[{short_symbol}] Aster Increments: Tick={short_tick}, Step={short_step}")
     else:  # Hyperliquid
         smk = short_venue_client._client.market(short_symbol)
         short_step = Decimal(str(smk["precision"]["amount"]))
@@ -217,6 +223,7 @@ def _calculate_trade_decision(
             short_tick = Decimal(str(smk["limits"]["price"]["min"]))
         else:
             short_tick = Decimal("1") / (Decimal(10) ** Decimal(smk["precision"]["price"]))
+        logger.info(f"[{short_symbol}] Hyperliquid Increments: Tick={short_tick}, Step={short_step} (from precision: {smk.get('precision')})")
 
     # 3. Quantities based on capital & leverage
     notional_value = capital_usd * Decimal(leverage)
@@ -224,8 +231,12 @@ def _calculate_trade_decision(
     qty_short = notional_value / price_short
 
     # 4. Round quantities to lot steps
+    qty_long_unrounded = qty_long
+    qty_short_unrounded = qty_short
     qty_long = round_qty_down(qty_long, long_step)
     qty_short = round_qty_down(qty_short, short_step)
+    logger.info(f"[{long_symbol}] Quantity: {qty_long_unrounded} -> Rounded: {qty_long}")
+    logger.info(f"[{short_symbol}] Quantity: {qty_short_unrounded} -> Rounded: {qty_short}")
 
     if qty_long <= 0 or qty_short <= 0:
         logger.error("Calculated quantity is zero. Increase capital or leverage.")
@@ -237,14 +248,21 @@ def _calculate_trade_decision(
 
     # Long leg (BUY): place below current price -> floor
     long_limit_price = floor_to_step(price_long - long_spread_abs, long_tick)
+    logger.info(f"[{long_symbol}] BUY limit price calc: {price_long} (mark) - {long_spread_abs} (spread) -> {long_limit_price}")
+
     # Short leg (SELL): place above current price -> ceil
     short_limit_price = ceil_to_step(price_short + short_spread_abs, short_tick)
+    logger.info(f"[{short_symbol}] SELL limit price calc: {price_short} (mark) + {short_spread_abs} (spread) -> {short_limit_price}")
 
     # Safety: ensure prices moved at least 1 tick to the passive side
     if long_limit_price >= price_long:
+        original_price = long_limit_price
         long_limit_price = floor_to_step(price_long - long_tick, long_tick)
+        logger.warning(f"[{long_symbol}] Safety check triggered. BUY price {original_price} >= {price_long} (mark). Adjusted to {long_limit_price}")
     if short_limit_price <= price_short:
+        original_price = short_limit_price
         short_limit_price = ceil_to_step(price_short + short_tick, short_tick)
+        logger.warning(f"[{short_symbol}] Safety check triggered. SELL price {original_price} <= {price_short} (mark). Adjusted to {short_limit_price}")
 
     # 6. Return decision incl. post-only target prices
     return StrategyDecision(
