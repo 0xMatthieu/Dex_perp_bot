@@ -249,7 +249,7 @@ class AsterClient:
 
                 payload: List[Tuple[str, Any]] = [
                     ("symbol", symbol), ("side", side.upper()), ("type", "LIMIT"),
-                    ("quantity", qty_str), ("price", price_str), ("timeInForce", "GTX"),
+                    ("quantity", qty_str), ("price", price_str), ("timeInForce", "GTC"),
                 ]
                 if params.get("reduceOnly"):
                     payload.append(("reduceOnly", "true"))

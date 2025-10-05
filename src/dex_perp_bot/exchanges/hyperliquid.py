@@ -161,7 +161,7 @@ class HyperliquidClient:
                     raise ValueError(f"Quantity {quantity} rounded to zero with step size {step_size}")
 
                 post_only_params = order_params.copy()
-                post_only_params["postOnly"] = True
+                post_only_params["postOnly"] = False
 
                 logger.info(f"Placing post-only LIMIT {side} for {qty_rounded} {symbol} @ {limit_price}")
                 return self._client.create_order(
