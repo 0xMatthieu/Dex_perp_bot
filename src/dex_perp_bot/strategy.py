@@ -289,6 +289,7 @@ def perform_hourly_rebalance(
     min_apy_diff_pct: Decimal,
     min_spread_pct: Decimal,
     spread_ticks: int,
+    cleanup_timeout_seconds: int,
 ) -> None:
     """
     Main strategy function to rebalance the portfolio hourly to the best opportunity.
@@ -343,7 +344,7 @@ def perform_hourly_rebalance(
     # 5. Close all open positions and orders
     logger.info("Closing all existing positions and orders before finding new opportunity...")
     cleanup_all_open_positions_and_orders(
-        aster_client, hyperliquid_client, timeout_seconds=900, close_spread_ticks=spread_ticks
+        aster_client, hyperliquid_client, timeout_seconds=cleanup_timeout_seconds, close_spread_ticks=spread_ticks
     )
     time.sleep(15)  # Allow time for balance updates after closing positions.
 

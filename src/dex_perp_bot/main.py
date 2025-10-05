@@ -87,6 +87,12 @@ def main() -> int:
                     )
 
                     if capital_to_deploy > Decimal("10"):
+                        # Calculate timeout: seconds remaining until the end of the trading window.
+                        end_of_window = now.replace(minute=TRADE_WINDOW_END_MINUTE, second=59, microsecond=0)
+                        cleanup_timeout_seconds = (end_of_window - now).total_seconds()
+                        # Ensure a minimum timeout, e.g., 60 seconds, to handle edge cases.
+                        cleanup_timeout_seconds = max(60, cleanup_timeout_seconds)
+
                         perform_hourly_rebalance(
                             aster_client,
                             hyperliquid_client,
@@ -95,6 +101,7 @@ def main() -> int:
                             min_apy_diff_pct=min_apy_diff_pct,
                             min_spread_pct=min_spread_pct,
                             spread_ticks=spread_ticks,
+                            cleanup_timeout_seconds=int(cleanup_timeout_seconds),
                         )
                     else:
                         logger.warning("Insufficient capital to deploy. Awaiting next cycle.")
