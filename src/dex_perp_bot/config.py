@@ -39,12 +39,25 @@ class AsterConfig:
 
 
 @dataclass(frozen=True)
+class StrategyConfig:
+    """Strategy parameters for the delta-neutral bot."""
+
+    leverage: int
+    capital_allocation_pct: float
+    min_apy_diff_pct: float
+    spread_ticks: int
+    rebalance_hysteresis_pct: float  # Only rebalance if new opp is this much better (APY %)
+    estimated_round_trip_cost_bps: float  # Estimated round-trip cost in basis points (all 4 trades)
+
+
+@dataclass(frozen=True)
 class Settings:
     """Aggregate project configuration loaded from environment variables."""
 
     hyperliquid: HyperliquidCredentials
     aster: AsterCredentials
     aster_config: AsterConfig
+    strategy: StrategyConfig
 
     @classmethod
     def from_env(cls, *, load_env_file: bool = True) -> "Settings":
@@ -91,10 +104,20 @@ class Settings:
             request_timeout=float(os.getenv("ASTER_TIMEOUT", "10")),
         )
 
+        strategy_config = StrategyConfig(
+            leverage=int(os.getenv("STRATEGY_LEVERAGE", "4")),
+            capital_allocation_pct=float(os.getenv("STRATEGY_CAPITAL_ALLOCATION_PCT", "0.9")),
+            min_apy_diff_pct=float(os.getenv("STRATEGY_MIN_APY_DIFF_PCT", "50")),
+            spread_ticks=int(os.getenv("STRATEGY_SPREAD_TICKS", "1")),
+            rebalance_hysteresis_pct=float(os.getenv("STRATEGY_REBALANCE_HYSTERESIS_PCT", "20")),
+            estimated_round_trip_cost_bps=float(os.getenv("STRATEGY_ROUND_TRIP_COST_BPS", "25")),
+        )
+
         return cls(
             hyperliquid=hyperliquid_credentials,
             aster=aster_credentials,
             aster_config=aster_config,
+            strategy=strategy_config,
         )
 
 

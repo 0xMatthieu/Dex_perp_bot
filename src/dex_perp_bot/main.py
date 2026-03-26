@@ -6,7 +6,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Add project root to path to allow importing from `tests`
 project_root = Path(__file__).resolve().parent.parent.parent
@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 def main() -> int:
     """Load configuration, initialize clients, and run the delta-neutral strategy."""
-    log_filename = f"logs/bot_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
+    Path("logs").mkdir(exist_ok=True)
+    log_filename = f"logs/bot_{datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -62,17 +63,17 @@ def main() -> int:
                 # Always report status on each loop iteration
                 report_portfolio_status(aster_client, hyperliquid_client)
 
-                now = datetime.now()
+                now = datetime.now(timezone.utc)
                 # Trading window is between 10 and 40 minutes past the hour.
                 if now.hour != last_trade_hour and TRADE_WINDOW_START_MINUTE <= now.minute <= TRADE_WINDOW_END_MINUTE:
                     last_trade_hour = now.hour
                     logger.info(f"--- Entering trading window for hour {now.hour} ---")
 
-                    leverage = 4
-                    capital_allocation_pct = Decimal("0.9")
-                    min_apy_diff_pct = Decimal("0")  # Minimum APY difference to consider a trade
-                    min_spread_pct = Decimal("0")  # Minimum price spread to enter a trade
-                    spread_ticks = 1  # Number of ticks for spread on entry/exit
+                    sc = settings.strategy
+                    leverage = sc.leverage
+                    capital_allocation_pct = Decimal(str(sc.capital_allocation_pct))
+                    min_apy_diff_pct = Decimal(str(sc.min_apy_diff_pct))
+                    spread_ticks = sc.spread_ticks
 
                     balance_hl = hyperliquid_client.get_wallet_balance().total or Decimal("0")
                     balance_aster = aster_client.get_wallet_balance().total or Decimal("0")
@@ -99,9 +100,9 @@ def main() -> int:
                             leverage=leverage,
                             capital_usd=capital_to_deploy,
                             min_apy_diff_pct=min_apy_diff_pct,
-                            min_spread_pct=min_spread_pct,
                             spread_ticks=spread_ticks,
                             cleanup_timeout_seconds=int(cleanup_timeout_seconds),
+                            rebalance_hysteresis_pct=Decimal(str(sc.rebalance_hysteresis_pct)),
                         )
                     else:
                         logger.warning("Insufficient capital to deploy. Awaiting next cycle.")
@@ -110,7 +111,7 @@ def main() -> int:
                 logger.exception("An error occurred during the strategy execution cycle: %s", exc)
 
             # --- Wait until the next check/action window ---
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             # Default next run is the start of the next trading window (HH:10)
             next_run_time = now.replace(minute=TRADE_WINDOW_START_MINUTE, second=0, microsecond=0)
             if now.minute >= TRADE_WINDOW_START_MINUTE:

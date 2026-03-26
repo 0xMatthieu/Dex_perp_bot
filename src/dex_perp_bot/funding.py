@@ -214,17 +214,18 @@ def fetch_and_compare_funding_rates(
                     funding_is_imminent=aster_funding_imminent, next_funding_time_ms=aster_rate.next_funding_time_ms,
                     long_max_leverage=None, short_max_leverage=None, is_actionable=False,
                 ))
-        # Strategy: Prioritize the more frequent (Hyperliquid) funding event if both are imminent.
+        # HL-only: Aster is not imminent, HL funding is the primary revenue, Aster is the hedge.
+        # Net APY must account for both sides (HL revenue minus Aster hedge cost).
         else:
-            # Hyperliquid is the driver. Use 1h basis.
             apy_aster_basis = aster_rate.apy_1h
             apy_hl_basis = hyperliquid_rate.apy_1h
             apy_basis = "1h"
 
             if hyperliquid_rate.rate < 0:  # Negative funding on HL -> longs get paid
+                # Long HL (receive), Short Aster (pay if aster rate<0, receive if aster rate>0)
                 comparisons.append(FundingComparison(
                     symbol=symbol, long_venue="Hyperliquid", short_venue="Aster",
-                    apy_difference=apy_hl_basis, apy_difference_basis=apy_basis,
+                    apy_difference=apy_hl_basis - apy_aster_basis, apy_difference_basis=apy_basis,
                     apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
                     apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
                     rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
@@ -232,9 +233,10 @@ def fetch_and_compare_funding_rates(
                     long_max_leverage=None, short_max_leverage=None, is_actionable=False,
                 ))
             elif hyperliquid_rate.rate > 0:  # Positive funding on HL -> shorts get paid
+                # Long Aster (pay if aster rate>0, receive if aster rate<0), Short HL (receive)
                 comparisons.append(FundingComparison(
                     symbol=symbol, long_venue="Aster", short_venue="Hyperliquid",
-                    apy_difference=apy_hl_basis, apy_difference_basis=apy_basis,
+                    apy_difference=apy_aster_basis - apy_hl_basis, apy_difference_basis=apy_basis,
                     apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
                     apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
                     rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,

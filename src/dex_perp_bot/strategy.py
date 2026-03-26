@@ -6,14 +6,19 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import TYPE_CHECKING, Dict, List, Optional
 
+from pathlib import Path
+
 from .funding import FundingComparison, fetch_and_compare_funding_rates
 from .exchanges.aster import AsterClient
 from .exchanges.hyperliquid import HyperliquidClient
+from .trade_log import log_trade
 
 if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+TRADE_LOG_PATH = Path("logs/trades.md")
 
 
 def report_portfolio_status(
@@ -281,15 +286,29 @@ def _calculate_trade_decision(
     )
 
 
+def _get_current_position_apy(
+    hl_positions: List[Dict],
+    aster_positions: List[Dict],
+    opportunities: List[FundingComparison],
+) -> Optional[Decimal]:
+    """Returns the APY of the current position if it matches any known opportunity."""
+    if not hl_positions or not aster_positions:
+        return None
+    for opp in opportunities:
+        if _is_portfolio_matching_opportunity(hl_positions, aster_positions, opp):
+            return abs(opp.apy_difference)
+    return None
+
+
 def perform_hourly_rebalance(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
     leverage: int,
     capital_usd: Decimal,
     min_apy_diff_pct: Decimal,
-    min_spread_pct: Decimal,
     spread_ticks: int,
     cleanup_timeout_seconds: int,
+    rebalance_hysteresis_pct: Decimal = Decimal("20"),
 ) -> None:
     """
     Main strategy function to rebalance the portfolio hourly to the best opportunity.
@@ -299,14 +318,17 @@ def perform_hourly_rebalance(
 
     # 1. Find all opportunities.
     opportunities = fetch_and_compare_funding_rates(
-        aster_client, hyperliquid_client, imminent_funding_minutes=60 # Use a wide window
+        aster_client, hyperliquid_client, imminent_funding_minutes=60  # Use a wide window
     )
     actionable_opportunities = [
         opp for opp in opportunities if opp.is_actionable and abs(opp.apy_difference) > min_apy_diff_pct
     ]
 
     if not actionable_opportunities:
-        logger.info("No actionable opportunities found meeting the minimum APY difference criteria. Waiting for next cycle.")
+        logger.info(
+            "No actionable opportunities found meeting the minimum APY difference of %s%%. Waiting for next cycle.",
+            min_apy_diff_pct,
+        )
         return
 
     best_opp = actionable_opportunities[0]
@@ -325,7 +347,23 @@ def perform_hourly_rebalance(
 
     if _is_portfolio_matching_opportunity(hl_positions, aster_positions, best_opp):
         logger.info("Already in optimal position for imminent funding. Holding position.")
-        #return
+        return
+
+    # 3b. Hysteresis: only rebalance if new opportunity is significantly better than current.
+    current_apy = _get_current_position_apy(hl_positions, aster_positions, opportunities)
+    if current_apy is not None:
+        improvement = abs(best_opp.apy_difference) - current_apy
+        if improvement < rebalance_hysteresis_pct:
+            logger.info(
+                "New opportunity (%.2f%% APY) is only %.2f%% better than current (%.2f%% APY). "
+                "Hysteresis threshold is %.2f%%. Holding current position.",
+                abs(best_opp.apy_difference), improvement, current_apy, rebalance_hysteresis_pct,
+            )
+            return
+        logger.info(
+            "New opportunity is %.2f%% APY better than current (%.2f%% -> %.2f%%). Rebalancing.",
+            improvement, current_apy, abs(best_opp.apy_difference),
+        )
 
     # 4. Calculate the new trade.
     decision = _calculate_trade_decision(
@@ -334,7 +372,7 @@ def perform_hourly_rebalance(
         best_opp,
         effective_leverage,
         capital_usd,
-        spread_ticks=spread_ticks,  # Place limit order X ticks away from the passive side
+        spread_ticks=spread_ticks,
         spread_bps=None,
     )
     if not decision:
@@ -384,23 +422,45 @@ def execute_strategy(
         quantity=long_qty, price=long_price,
     )
     logger.info(f"Long order ({decision.opportunity.long_venue}) response: {long_order_res}")
+    log_trade(
+        TRADE_LOG_PATH,
+        action="OPEN", symbol=decision.opportunity.symbol, side="BUY",
+        venue=decision.opportunity.long_venue,
+        quantity=decision.long_qty, price=decision.long_limit_price,
+        leverage=decision.leverage,
+        funding_rate=decision.opportunity.rate_aster if decision.opportunity.long_venue == "Aster" else decision.opportunity.rate_hyperliquid,
+        apy_difference=decision.opportunity.apy_difference,
+        notes=f"basis={decision.opportunity.apy_difference_basis}",
+    )
 
     short_order_res = short_venue_client.place_order(
         symbol=decision.short_symbol, side="SELL", order_type="MAKER_TAKER",
         quantity=short_qty, price=short_price,
     )
     logger.info(f"Short order ({decision.opportunity.short_venue}) response: {short_order_res}")
+    log_trade(
+        TRADE_LOG_PATH,
+        action="OPEN", symbol=decision.opportunity.symbol, side="SELL",
+        venue=decision.opportunity.short_venue,
+        quantity=decision.short_qty, price=decision.short_limit_price,
+        leverage=decision.leverage,
+        funding_rate=decision.opportunity.rate_aster if decision.opportunity.short_venue == "Aster" else decision.opportunity.rate_hyperliquid,
+        apy_difference=decision.opportunity.apy_difference,
+        notes=f"basis={decision.opportunity.apy_difference_basis}",
+    )
 
     # 3. Verify positions were opened successfully.
     logger.info("Verifying positions are open and match the strategy...")
     start_time = time.time()
     timeout_seconds = 30
+    verified = False
     while time.time() - start_time < timeout_seconds:
         try:
             hl_positions = hyperliquid_client.get_all_positions()
             aster_positions = aster_client.get_all_positions()
             if _is_portfolio_matching_opportunity(hl_positions, aster_positions, decision.opportunity):
                 logger.info("Successfully verified new positions are open.")
+                verified = True
                 break
 
             logger.info(f"Waiting for positions to open. HL: {len(hl_positions)}, Aster: {len(aster_positions)}")
@@ -408,9 +468,36 @@ def execute_strategy(
         except Exception as exc:
             logger.warning(f"Error during position opening verification, retrying: {exc}")
             time.sleep(2)
-    else:
+
+    if not verified:
         logger.error(f"Timeout: Positions not confirmed open after {timeout_seconds} seconds.")
-    
+        # Partial fill rollback: if only one side filled, close it to avoid naked exposure.
+        try:
+            hl_positions = hyperliquid_client.get_all_positions()
+            aster_positions = aster_client.get_all_positions()
+            hl_has_pos = len(hl_positions) > 0
+            aster_has_pos = len(aster_positions) > 0
+
+            if hl_has_pos != aster_has_pos:
+                logger.warning(
+                    "PARTIAL FILL DETECTED: HL has %d position(s), Aster has %d. "
+                    "Rolling back to avoid unhedged exposure.",
+                    len(hl_positions), len(aster_positions),
+                )
+                cleanup_all_open_positions_and_orders(
+                    aster_client, hyperliquid_client, timeout_seconds=60, close_spread_ticks=1,
+                )
+            elif hl_has_pos and aster_has_pos:
+                logger.warning(
+                    "Both sides have positions but they don't match the expected opportunity. "
+                    "Closing all to avoid mismatched exposure."
+                )
+                cleanup_all_open_positions_and_orders(
+                    aster_client, hyperliquid_client, timeout_seconds=60, close_spread_ticks=1,
+                )
+        except Exception as exc:
+            logger.error(f"Error during partial fill rollback: {exc}")
+
     logger.info("Strategy execution complete.")
 
 
@@ -472,6 +559,13 @@ def cleanup_all_open_positions_and_orders(
                 if symbol:
                     try:
                         aster_client.close_position(symbol, spread_ticks=close_spread_ticks)
+                        pos_amt = abs(Decimal(pos.get("positionAmt", "0")))
+                        price = aster_client.get_price(symbol)
+                        side = "SELL" if Decimal(pos.get("positionAmt", "0")) > 0 else "BUY"
+                        log_trade(
+                            TRADE_LOG_PATH, action="CLOSE", symbol=symbol,
+                            side=side, venue="Aster", quantity=pos_amt, price=price,
+                        )
                     except Exception as exc:
                         logger.error(f"Failed to close position for {symbol} on Aster: {exc}")
         else:
@@ -488,6 +582,13 @@ def cleanup_all_open_positions_and_orders(
                 if symbol:
                     try:
                         hyperliquid_client.close_position(symbol, spread_ticks=close_spread_ticks)
+                        contracts = abs(Decimal(str(pos.get("contracts", "0"))))
+                        price = hyperliquid_client.get_price(symbol)
+                        side = "SELL" if pos.get("side") == "long" else "BUY"
+                        log_trade(
+                            TRADE_LOG_PATH, action="CLOSE", symbol=symbol,
+                            side=side, venue="Hyperliquid", quantity=contracts, price=price,
+                        )
                     except Exception as exc:
                         logger.error(f"Failed to close position for {symbol} on Hyperliquid: {exc}")
         else:

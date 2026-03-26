@@ -9,8 +9,7 @@ import time
 import urllib.parse
 import uuid
 from decimal import Decimal, InvalidOperation
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import requests
 
@@ -297,51 +296,6 @@ class AsterClient:
         logger.info("Placing order with payload: %s", dict(order_payload))
         return self._post_signed("/fapi/v1/order", body=order_payload)
 
-    def _place_single_order(
-        self,
-        symbol: str,
-        side: str,
-        order_type: str,
-        quantity: Decimal,
-        current_price: Decimal,
-        tick_size: Decimal,
-        step_size: Decimal,
-    ) -> Dict[str, Any]:
-        """Helper to place a single order on Aster."""
-        client_order_id = f"dxp-{uuid.uuid4().hex}"
-        order_payload: List[Tuple[str, Any]] = [
-            ("symbol", symbol),
-            ("side", side.upper()),
-            ("type", order_type.upper()),
-            ("newClientOrderId", client_order_id),
-        ]
-
-        # Format quantity according to stepSize precision
-        qty_precision = -step_size.normalize().as_tuple().exponent
-        qty_str = f"{quantity:.{qty_precision}f}"
-        order_payload.append(("quantity", qty_str))
-
-        if order_type.upper() == "LIMIT":
-            # For testing cancellation, place the order far from the current price
-            # to ensure it is not filled immediately.
-            if side.upper() == "BUY":
-                limit_price = current_price * Decimal("0.8")
-            else:
-                limit_price = current_price * Decimal("1.2")
-            rounded_price = round(limit_price / tick_size) * tick_size
-            price_precision = -tick_size.normalize().as_tuple().exponent
-            price_str = f"{rounded_price:.{price_precision}f}"
-            order_payload.extend([
-                ("price", price_str),
-                ("timeInForce", "GTC"),
-            ])
-
-        logger.info("Placing order with payload: %s", dict(order_payload))
-        order_response = self._post_signed("/fapi/v1/order", body=order_payload)
-
-        print("Final order payload:", dict(order_payload))
-        return order_response
-
     def _get_public(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """Generic public GET request helper."""
         url = f"{self._config.base_url.rstrip('/')}{endpoint}"
@@ -351,95 +305,6 @@ class AsterClient:
             return response.json()
         except requests.RequestException as exc:  # pragma: no cover - network failure
             raise DexAPIError(f"Aster public request to {endpoint} failed") from exc
-
-    def create_order(
-        self,
-        side: str,
-        order_type: str,
-        leverage: int,
-        margin_usd: float,
-    ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
-        """Create an order on Aster for BTCUSDT."""
-        symbol = "BTCUSDT"
-
-        # 1. Query exchangeInfo for filters
-        logger.info("Fetching symbol filters for %s", symbol)
-        filters = self.get_symbol_filters(symbol)
-        tick_size = filters["tick_size"]
-        step_size = filters["step_size"]
-        min_notional = filters["min_notional"]
-        max_quantity = filters["limit_max_quantity"] if order_type == "LIMIT" else filters["market_max_quantity"]
-        min_quantity = filters["limit_min_quantity"] if order_type == "LIMIT" else filters["market_min_quantity"]
-
-        # 2. Query for current price
-        logger.info("Fetching ticker price for %s", symbol)
-        price_info = self._get_public("/fapi/v1/ticker/price", params={"symbol": symbol})
-        current_price = Decimal(price_info["price"])
-
-        # 3. Query for available balance (withdrawable)
-        logger.info("Fetching account balance to log available funds")
-        account_info_response = self._get_signed(self._config.balance_endpoint, params=[])
-        account_data = self._extract_account_data(account_info_response)
-        available_balance = to_decimal(find_first_key(account_data, self._config.available_fields))
-        logger.info("Available balance: %s", available_balance)
-
-        # 4. Compute order quantity
-        qty = (Decimal(str(margin_usd)) * Decimal(leverage)) / current_price
-        # Round down to stepSize
-        qty = (qty // step_size) * step_size
-
-        if qty == 0:
-            raise ValueError(
-                f"Calculated quantity is zero for margin {margin_usd}, leverage {leverage}. "
-                f"This may be due to low margin or high price. stepSize is {step_size}"
-            )
-
-        # Use current_price for notional check, even for LIMIT orders, as it's a pre-check.
-        notional_value = qty * current_price
-        if notional_value < min_notional:
-            raise ValueError(
-                f"Notional value {notional_value} is less than minNotional {min_notional}. "
-                f"Increase margin or leverage."
-            )
-
-        # 5. Set leverage
-        logger.info("Setting leverage for %s to %sx", symbol, leverage)
-        self._post_signed(
-            "/fapi/v1/leverage",
-            query=[("symbol", symbol), ("leverage", leverage)],
-            signature_location="query",
-        )
-
-        # 6. Place order(s)
-        if qty <= max_quantity:
-            # Place a single order
-            return self._place_single_order(symbol, side, order_type, qty, current_price, tick_size, step_size)
-
-        # Split into chunks if qty > max_quantity
-        logger.info(f"Quantity {qty} exceeds max {max_quantity}, splitting into multiple orders.")
-        results = []
-        remaining_qty = qty
-        while remaining_qty > 0:
-            chunk_qty = min(remaining_qty, max_quantity)
-            # Round down to stepSize
-            chunk_qty = (chunk_qty // step_size) * step_size
-
-            if chunk_qty < min_quantity:
-                logger.warning(f"Remaining quantity {remaining_qty} is less than min quantity {min_quantity}, stopping.")
-                break
-
-            try:
-                res = self._place_single_order(
-                    symbol, side, order_type, chunk_qty, current_price, tick_size, step_size
-                )
-                results.append(res)
-                remaining_qty -= chunk_qty
-                time.sleep(0.1)  # Small delay to avoid rate limiting issues
-            except DexAPIError as exc:
-                logger.error(f"Error placing chunk of size {chunk_qty}: {exc}. Stopping further chunks.")
-                break
-
-        return results
 
     def get_all_open_orders(self) -> List[Dict[str, Any]]:
         """Query all open orders."""
