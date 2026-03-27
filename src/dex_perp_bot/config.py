@@ -58,6 +58,7 @@ class Settings:
     aster: AsterCredentials
     aster_config: AsterConfig
     strategy: StrategyConfig
+    discord_webhook_url: Optional[str]
 
     @classmethod
     def from_env(cls, *, load_env_file: bool = True) -> "Settings":
@@ -113,11 +114,14 @@ class Settings:
             estimated_round_trip_cost_bps=float(os.getenv("STRATEGY_ROUND_TRIP_COST_BPS", "25")),
         )
 
+        discord_url = os.getenv("DISCORD_WEBHOOK_URL", "").strip() or None
+
         return cls(
             hyperliquid=hyperliquid_credentials,
             aster=aster_credentials,
             aster_config=aster_config,
             strategy=strategy_config,
+            discord_webhook_url=discord_url,
         )
 
 

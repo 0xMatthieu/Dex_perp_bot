@@ -1,80 +1,39 @@
 # Dex Perp Bot
 
-This bot implements a delta-neutral funding rate arbitrage strategy between Hyperliquid and Aster perpetuals exchanges. It is designed to run continuously, identify imminent funding rate opportunities, and rebalance the portfolio to capture the funding yield while remaining market-neutral.
+Delta-neutral funding rate arbitrage bot between Hyperliquid and Aster DEX perpetuals. Monitors funding rates, opens opposing positions to capture yield while remaining market-neutral, and holds across funding periods to maximize returns.
 
-The core logic is to:
-1.  Continuously monitor funding rates on both exchanges for all common markets.
-2.  Identify opportunities where funding is imminent (e.g., within 5 minutes) and the APY difference is profitable.
-3.  Dynamically determine the maximum safe leverage based on exchange limits for the target asset.
-4.  Check the current portfolio. If not already in the optimal position, it will close all existing positions and open a new delta-neutral position (long on one venue, short on the other) to capture the best funding rate.
-5.  Hold positions between funding events to farm potential airdrop points.
+---
 
-## Strategy Details
+## How It Works
 
-The bot's primary goal is to capture funding rate payments by positioning itself correctly just before a funding event occurs. Since Hyperliquid and Aster have different funding intervals, the bot uses a time-based approach to decide which opportunity to pursue.
+1. **Rate scanning** -- fetches predicted funding rates from both exchanges every hour
+2. **Opportunity ranking** -- compares rates across all common markets, prioritizes Aster (4h funding, larger payments) over Hyperliquid (1h, hedge side)
+3. **Fee-aware filtering** -- only trades when net APY exceeds a configurable threshold (default 50%) that accounts for round-trip costs
+4. **Hysteresis** -- won't rebalance to a new asset unless the improvement exceeds a threshold (default 20% APY), preventing churn
+5. **Execution** -- opens opposing positions (long on one exchange, short on the other) using a maker-taker strategy: post-only limit first, market fallback
+6. **Holding** -- keeps positions across multiple funding periods as long as the opportunity remains favorable
+7. **Safety** -- partial fill rollback closes one-sided positions to prevent unhedged exposure
 
-*   **Funding Intervals:**
-    *   **Hyperliquid:** Funding occurs **every hour**. APY calculations are based on this 1-hour interval.
-    *   **Aster:** Funding occurs **every 4 hours** (at 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC). APY calculations use this 4-hour interval.
+---
 
-*   **Decision Logic:**
-    1.  The bot checks for "imminent" funding events on both exchanges. An event is considered imminent if it's scheduled to occur within the bot's lookahead window (e.g., the next 20 minutes).
-    2.  If a **Hyperliquid** funding event is imminent, it becomes the primary target. The bot compares the APYs using a **1-hour basis**.
-    3.  If only an **Aster** funding event is imminent, the bot compares APYs using a **4-hour basis**.
-    4.  The bot determines the profitable side of the trade (which venue to long, which to short) based on which exchange is paying more for a position. A negative funding rate means longs get paid, while a positive rate means shorts get paid.
+## Setup
 
-*   **Example Scenario:**
-    *   It's 10:45 UTC. The next Hyperliquid funding is at 11:00 UTC (imminent). The next Aster funding is at 12:00 UTC (not imminent).
-    *   The bot will use the **1-hour APY basis** for its comparison.
-    *   Suppose for BTC:
-        *   Hyperliquid's funding rate is `-0.001%` (longs get paid). This translates to a positive APY for longs.
-        *   Aster's funding rate is `+0.0005%` (shorts get paid). This is a cost for longs.
-    *   The bot calculates that going **long on Hyperliquid** and **short on Aster** offers the best APY difference.
-    *   If the portfolio is not already in this state, it will close any existing positions and open new ones to capture the 11:00 UTC Hyperliquid funding payment.
+### Prerequisites
 
-*   **Order Execution Strategy:**
-    To minimize trading fees, the bot employs a "maker-taker" strategy for both opening and closing positions.
-    1.  **Maker Attempt:** It first attempts to place a **post-only limit order** on the passive side of the order book. This is designed to add liquidity and potentially earn a maker rebate.
-    2.  **Taker Fallback:** If the post-only order would cross the spread and execute immediately, the exchange rejects it. The bot catches this and immediately falls back to placing a **market order**. This ensures the position is established quickly, which is critical for capturing imminent funding payments.
-    This two-step process balances the goal of fee reduction with the primary objective of timely execution.
+- Python 3.11+
+- Hyperliquid and Aster API credentials
 
-## Project layout
-
-```
-src/
-  dex_perp_bot/
-    config.py            # Environment-driven configuration and secrets loading
-    funding.py           # Logic for fetching and comparing funding rates
-    strategy.py          # Core delta-neutral strategy, rebalancing, and execution logic
-    exchanges/
-      base.py            # Shared exchange models and exceptions
-      hyperliquid.py     # Hyperliquid connector built on the official SDK
-      aster.py           # HTTP connector for Aster
-    main.py              # Main entry point to run the strategy loop
-tests/
-  test.py                # Integration tests for funding, orders, and wallet balance
-```
-
-## Requirements
-
-* Python 3.8+
-* Hyperliquid and Aster API credentials exported as environment variables or stored in a `.env` file.
-
-Install the runtime dependencies using `pip`:
+### 1. Install dependencies
 
 ```bash
 pip install .
 ```
 
-To develop or run the tests install the optional dev dependencies as well:
+### 2. Configure environment
 
-```bash
-pip install .[dev]
-```
+Copy or create a `.env` file with your credentials:
 
-## Configuration
-
-The application expects the following environment variables:
+**Required:**
 
 | Variable | Description |
 |----------|-------------|
@@ -83,34 +42,117 @@ The application expects the following environment variables:
 | `ASTER_API_KEY` | Aster API key |
 | `ASTER_API_SECRET` | Aster API secret |
 
-The following variables for Aster are optional and have sensible defaults:
+**Strategy parameters (optional, sensible defaults):**
 
-| Variable | Description |
-|----------|-------------|
-| `ASTER_BALANCE_ENDPOINT` | Optional endpoint path for the balance query (defaults to `/fapi/v4/account`) |
-| `ASTER_RESPONSE_PATH` | Optional dotted path that points to the JSON object containing balance fields (defaults to the root object) |
-| `ASTER_AVAILABLE_FIELDS` | Optional comma-separated list of keys for available balance (defaults to `availableBalance,maxWithdrawAmount,totalMarginBalance`) |
-| `ASTER_TOTAL_FIELDS` | Optional comma-separated list of keys for total balance (defaults to `totalWalletBalance,totalMarginBalance`) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STRATEGY_LEVERAGE` | `4` | Trading leverage |
+| `STRATEGY_CAPITAL_ALLOCATION_PCT` | `0.9` | Fraction of min(HL, Aster) balance to deploy |
+| `STRATEGY_MIN_APY_DIFF_PCT` | `50` | Minimum APY difference to enter a trade |
+| `STRATEGY_SPREAD_TICKS` | `1` | Ticks away from mid for limit orders |
+| `STRATEGY_REBALANCE_HYSTERESIS_PCT` | `20` | APY improvement required to switch assets |
+| `STRATEGY_ROUND_TRIP_COST_BPS` | `25` | Estimated round-trip cost in basis points |
 
-Configuration is loaded from the process environment. A `.env` file can be used during development.
+**Aster API (optional, rarely needed):**
 
-## Usage
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ASTER_BASE_URL` | `https://fapi.asterdex.com` | Aster API base URL |
+| `ASTER_BALANCE_ENDPOINT` | `/fapi/v4/account` | Balance query endpoint |
+| `ASTER_AVAILABLE_FIELDS` | `availableBalance,maxWithdrawAmount,totalMarginBalance` | Fields for available balance |
+| `ASTER_TOTAL_FIELDS` | `totalMarginBalance,totalWalletBalance` | Fields for total balance |
+| `ASTER_TIMEOUT` | `10` | Request timeout in seconds |
 
-Once credentials are configured, run the main strategy loop:
+**Notifications (optional):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DISCORD_WEBHOOK_URL` | *(disabled)* | Discord webhook URL for trade/error notifications |
+
+### 3. Run the bot
 
 ```bash
 python -m src.dex_perp_bot.main
 ```
 
-The bot will run continuously, checking for opportunities at a defined interval (currently 10 seconds for testing). Press `Ctrl+C` to stop the bot.
+The bot runs continuously. Each hour (minutes 5-55 UTC), it checks for opportunities and acts. Press `Ctrl+C` to stop.
+
+---
+
+## Strategy Details
+
+- **Aster first** -- Aster funding (every 4h) is the primary revenue source. Hyperliquid (every 1h) serves as the hedge.
+- **Net APY** -- the bot calculates the net APY across both legs: funding received minus funding paid on the hedge side.
+- **Maker-taker execution** -- tries a post-only limit order first (lower fees), falls back to market if it would cross the book.
+- **Position holding** -- once in a position, the bot holds across multiple funding periods. It only closes when a significantly better opportunity appears or the rate flips.
+
+---
+
+## Trade Report
+
+All trades are logged to `logs/trades.md` as a markdown report with daily summary tables:
+
+```
+## 2026-03-27
+
+| Metric | Value |
+|--------|-------|
+| Trades | 2 opens, 2 closes |
+| Rebalances | ~1 |
+| Symbols | ETH |
+| Open notional | $9,543.02 |
+| Close notional | $9,550.51 |
+
+### Trades
+
+- `08:05:12` **OPEN ETH** BUY on **Aster** ...
+```
+
+---
+
+## Discord Notifications
+
+Set `DISCORD_WEBHOOK_URL` to receive notifications on:
+- Position opened/closed
+- Holding (already in optimal position)
+- No opportunity found
+- Partial fill rollback
+- Errors
+- Bot start/stop
+
+If the variable is empty or unset, notifications are silently disabled.
+
+---
+
+## Architecture
+
+```
+src/dex_perp_bot/
+  main.py              Entry point: hourly loop, trading window scheduling
+  config.py            Environment config, credentials, strategy parameters
+  funding.py           Funding rate fetching, APY calculation, opportunity comparison
+  strategy.py          Delta-neutral strategy, rebalancing, execution, cleanup
+  trade_log.py         Markdown trade report generator
+  notifier.py          Optional Discord webhook notifications
+  exchanges/
+    base.py            Shared models (WalletBalance) and exceptions
+    hyperliquid.py     Hyperliquid connector (CCXT/SDK)
+    aster.py           Aster connector (Binance-style HTTP + HMAC signing)
+tests/
+  test.py              Integration tests for funding, orders, and wallet balance
+```
 
 ## Testing
 
-The project includes an integration test suite that can be used to verify individual components of the strategy.
-
-To run the funding rate comparison test:
 ```bash
 python tests/test.py
 ```
 
+Runs integration tests against live exchanges. Use with caution -- it places real orders.
 
+---
+
+## Security Notes
+
+- **Private keys** are loaded from `.env` and never logged. Add `.env` to `.gitignore`.
+- **Stablecoin risk** -- Hyperliquid uses USDC, Aster uses USDT. A depeg of either creates hidden directional exposure.

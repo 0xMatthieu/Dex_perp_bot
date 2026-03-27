@@ -14,7 +14,7 @@ from .exchanges.hyperliquid import HyperliquidClient
 from .trade_log import log_trade
 
 if TYPE_CHECKING:
-    pass
+    from .notifier import DiscordNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -309,6 +309,7 @@ def perform_hourly_rebalance(
     spread_ticks: int,
     cleanup_timeout_seconds: int,
     rebalance_hysteresis_pct: Decimal = Decimal("20"),
+    notifier: Optional["DiscordNotifier"] = None,
 ) -> None:
     """
     Main strategy function to rebalance the portfolio hourly to the best opportunity.
@@ -329,6 +330,8 @@ def perform_hourly_rebalance(
             "No actionable opportunities found meeting the minimum APY difference of %s%%. Waiting for next cycle.",
             min_apy_diff_pct,
         )
+        if notifier:
+            notifier.notify_no_opportunity(min_apy_diff_pct)
         return
 
     best_opp = actionable_opportunities[0]
@@ -347,6 +350,8 @@ def perform_hourly_rebalance(
 
     if _is_portfolio_matching_opportunity(hl_positions, aster_positions, best_opp):
         logger.info("Already in optimal position for imminent funding. Holding position.")
+        if notifier:
+            notifier.notify_holding(best_opp.symbol, abs(best_opp.apy_difference))
         return
 
     # 3b. Hysteresis: only rebalance if new opportunity is significantly better than current.
@@ -380,20 +385,24 @@ def perform_hourly_rebalance(
         return
 
     # 5. Close all open positions and orders
-    logger.info("Closing all existing positions and orders before finding new opportunity...")
-    cleanup_all_open_positions_and_orders(
-        aster_client, hyperliquid_client, timeout_seconds=cleanup_timeout_seconds, close_spread_ticks=spread_ticks
-    )
-    time.sleep(15)  # Allow time for balance updates after closing positions.
+    if hl_positions or aster_positions:
+        logger.info("Closing all existing positions and orders before finding new opportunity...")
+        if notifier:
+            notifier.notify_trade_closed(reason="rebalancing to better opportunity")
+        cleanup_all_open_positions_and_orders(
+            aster_client, hyperliquid_client, timeout_seconds=cleanup_timeout_seconds, close_spread_ticks=spread_ticks
+        )
+        time.sleep(15)  # Allow time for balance updates after closing positions.
 
     # 6. Execute the trade.
-    execute_strategy(aster_client, hyperliquid_client, decision)
+    execute_strategy(aster_client, hyperliquid_client, decision, notifier=notifier)
 
 
 def execute_strategy(
     aster_client: AsterClient,
     hyperliquid_client: HyperliquidClient,
     decision: StrategyDecision,
+    notifier: Optional["DiscordNotifier"] = None,
 ) -> None:
     """
     Executes a pre-determined strategy by setting leverage and placing orders.
@@ -461,6 +470,15 @@ def execute_strategy(
             if _is_portfolio_matching_opportunity(hl_positions, aster_positions, decision.opportunity):
                 logger.info("Successfully verified new positions are open.")
                 verified = True
+                if notifier:
+                    notifier.notify_trade_opened(
+                        symbol=decision.opportunity.symbol,
+                        long_venue=decision.opportunity.long_venue,
+                        short_venue=decision.opportunity.short_venue,
+                        apy_difference=abs(decision.opportunity.apy_difference),
+                        leverage=decision.leverage,
+                        capital=decision.margin,
+                    )
                 break
 
             logger.info(f"Waiting for positions to open. HL: {len(hl_positions)}, Aster: {len(aster_positions)}")
@@ -479,19 +497,24 @@ def execute_strategy(
             aster_has_pos = len(aster_positions) > 0
 
             if hl_has_pos != aster_has_pos:
-                logger.warning(
-                    "PARTIAL FILL DETECTED: HL has %d position(s), Aster has %d. "
-                    "Rolling back to avoid unhedged exposure.",
-                    len(hl_positions), len(aster_positions),
+                reason = (
+                    f"PARTIAL FILL: HL has {len(hl_positions)} position(s), "
+                    f"Aster has {len(aster_positions)}. Closing to avoid unhedged exposure."
                 )
+                logger.warning(reason)
+                if notifier:
+                    notifier.notify_rollback(reason)
                 cleanup_all_open_positions_and_orders(
                     aster_client, hyperliquid_client, timeout_seconds=60, close_spread_ticks=1,
                 )
             elif hl_has_pos and aster_has_pos:
-                logger.warning(
+                reason = (
                     "Both sides have positions but they don't match the expected opportunity. "
                     "Closing all to avoid mismatched exposure."
                 )
+                logger.warning(reason)
+                if notifier:
+                    notifier.notify_rollback(reason)
                 cleanup_all_open_positions_and_orders(
                     aster_client, hyperliquid_client, timeout_seconds=60, close_spread_ticks=1,
                 )

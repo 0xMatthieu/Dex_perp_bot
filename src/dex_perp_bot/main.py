@@ -19,6 +19,7 @@ from src.dex_perp_bot.config import Settings
 from src.dex_perp_bot.exchanges.aster import AsterClient
 from src.dex_perp_bot.exchanges.base import DexAPIError, DexClientError
 from src.dex_perp_bot.exchanges.hyperliquid import HyperliquidClient
+from src.dex_perp_bot.notifier import DiscordNotifier
 from src.dex_perp_bot.strategy import perform_hourly_rebalance, report_portfolio_status
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,8 @@ def main() -> int:
         logger.error("Configuration error: %s", exc)
         return 1
 
+    notifier = DiscordNotifier(settings.discord_webhook_url)
+
     hyperliquid_client = HyperliquidClient(settings.hyperliquid)
     aster_client = AsterClient(settings.aster, settings.aster_config)
 
@@ -52,6 +55,7 @@ def main() -> int:
     except DexAPIError as exc:
         logger.error("Failed to sync time with Aster: %s", exc)
 
+    notifier.notify_startup()
     logger.info("Starting strategy loop. Press Ctrl+C to stop.")
     last_trade_hour = -1
 
@@ -103,12 +107,14 @@ def main() -> int:
                             spread_ticks=spread_ticks,
                             cleanup_timeout_seconds=int(cleanup_timeout_seconds),
                             rebalance_hysteresis_pct=Decimal(str(sc.rebalance_hysteresis_pct)),
+                            notifier=notifier,
                         )
                     else:
                         logger.warning("Insufficient capital to deploy. Awaiting next cycle.")
 
             except DexClientError as exc:
                 logger.exception("An error occurred during the strategy execution cycle: %s", exc)
+                notifier.notify_error(str(exc))
 
             # --- Wait until the next check/action window ---
             now = datetime.now(timezone.utc)
@@ -127,6 +133,7 @@ def main() -> int:
 
     except KeyboardInterrupt:
         logger.info("Shutdown signal received. Exiting.")
+        notifier.notify_shutdown()
         return 0
 
 
