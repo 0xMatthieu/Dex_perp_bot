@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional
 
 from pathlib import Path
 
@@ -20,6 +20,7 @@ from .exchanges.aster import AsterClient
 from .exchanges.hyperliquid import HyperliquidClient
 from .microstructure import (
     basis_bps, basis_gain_bps, breakeven_hours, expected_reversion_bps, favorable_z, funding_bps_per_hour,
+    half_spread_bps,
 )
 from .trade_log import log_trade
 
@@ -65,13 +66,52 @@ def save_position_state(state: Optional[Dict], path: Path = POSITION_STATE_PATH)
         logger.warning("Could not write position state: %s", exc)
 
 
-def current_basis(aster_client: AsterClient, hyperliquid_client: HyperliquidClient, base: str) -> Decimal:
-    """Aster premium over HL in bps from both mid prices."""
+def market_snapshot(aster_client: AsterClient, hyperliquid_client: HyperliquidClient, base: str) -> Dict:
+    """Basis plus what execution will cost on each venue: half-spreads and tick granularity, in bps."""
     a = aster_client.get_book(aster_symbol(base), depth=1)
     h = hyperliquid_client.get_book(hl_symbol(base), depth=1)
     mid_a = (a["bids"][0][0] + a["asks"][0][0]) / 2
     mid_h = (h["bids"][0][0] + h["asks"][0][0]) / 2
-    return basis_bps(mid_a, mid_h)
+    tick_a, _ = aster_client.get_increments(aster_symbol(base))
+    tick_h, _ = hyperliquid_client.get_increments(hl_symbol(base))
+    return {
+        "basis_bps": basis_bps(mid_a, mid_h),
+        "half_spread_aster_bps": half_spread_bps(a["bids"], a["asks"]),
+        "half_spread_hl_bps": half_spread_bps(h["bids"], h["asks"]),
+        "tick_aster_bps": tick_a / mid_a * Decimal(10_000) if mid_a else Decimal(0),
+        "tick_hl_bps": tick_h / mid_h * Decimal(10_000) if mid_h else Decimal(0),
+    }
+
+
+def current_basis(aster_client: AsterClient, hyperliquid_client: HyperliquidClient, base: str) -> Decimal:
+    """Aster premium over HL in bps from both mid prices."""
+    return market_snapshot(aster_client, hyperliquid_client, base)["basis_bps"]
+
+
+def hedge_cross_bps(snapshot: Dict) -> Decimal:
+    """The hedge leg crosses the tighter book: half its spread is paid on top of the taker fee."""
+    return min(snapshot["half_spread_aster_bps"], snapshot["half_spread_hl_bps"])
+
+
+def cancel_all_open_orders(aster_client: AsterClient, hyperliquid_client: HyperliquidClient, *, reason: str) -> int:
+    """Cancel every resting order on both venues (orphans after a restart, or on shutdown)."""
+    n = 0
+    try:
+        for o in aster_client.get_all_open_orders():
+            if o.get("symbol") and o.get("orderId") is not None:
+                aster_client.cancel_by_id(o["symbol"], str(o["orderId"])); n += 1
+    except Exception as exc:
+        logger.warning("Aster cancel-all failed: %s", exc)
+    try:
+        for o in hyperliquid_client.get_all_open_orders():
+            if o.get("symbol") and o.get("id"):
+                hyperliquid_client.cancel_by_id(o["symbol"], str(o["id"])); n += 1
+    except Exception as exc:
+        logger.warning("Hyperliquid cancel-all failed: %s", exc)
+    if n:
+        logger.warning("Cancelled %d resting order(s): %s", n, reason)
+        log_event("note", message="cancelled resting orders", count=n, reason=reason)
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -83,20 +123,40 @@ def evaluate_entry_gate(
     exec_cfg: ExecutionConfig,
     tracker: BasisTracker,
     basis_now_bps: Decimal,
+    snapshot: Optional[Dict] = None,
 ) -> Dict:
-    """Return a dict with ``ok`` plus every input, and log it as a ``gate`` event."""
+    """Return a dict with ``ok`` plus every input, and log it as a ``gate`` event.
+
+    Cost of a round trip = maker+taker fees on both venues + crossing the tighter book twice
+    (hedge on entry, hedge on exit) - expected basis reversion.
+    """
     stats = tracker.stats(opp.symbol, basis_now_bps, exec_cfg.basis_window_hours, exec_cfg.basis_min_samples)
     reversion = expected_reversion_bps(stats, opp.long_venue)
     fz = favorable_z(stats, opp.long_venue)
     fee_cost = Decimal(str(exec_cfg.round_trip_cost_bps))
-    effective_cost = fee_cost - reversion
+    crossing = 2 * hedge_cross_bps(snapshot) if snapshot else Decimal(0)
+    tick_bps = max(snapshot["tick_aster_bps"], snapshot["tick_hl_bps"]) if snapshot else Decimal(0)
+    effective_cost = fee_cost + crossing - reversion
     hours = breakeven_hours(effective_cost, opp.apy_difference)
-    ok = hours <= exec_cfg.max_breakeven_hours
-    reason_code = "ok" if ok else ("adverse_basis" if reversion < 0 and breakeven_hours(fee_cost, opp.apy_difference) <= exec_cfg.max_breakeven_hours else "breakeven_too_long")
+    tick_ok = tick_bps <= Decimal(str(exec_cfg.max_tick_bps))
+    ok = hours <= exec_cfg.max_breakeven_hours and tick_ok
+    if not tick_ok:
+        reason_code = "tick_too_coarse"
+    elif ok:
+        reason_code = "ok"
+    elif reversion < 0 and breakeven_hours(fee_cost + crossing, opp.apy_difference) <= exec_cfg.max_breakeven_hours:
+        reason_code = "adverse_basis"
+    elif breakeven_hours(fee_cost, opp.apy_difference) <= exec_cfg.max_breakeven_hours:
+        reason_code = "spread_too_wide"
+    else:
+        reason_code = "breakeven_too_long"
     info = {
         "symbol": opp.symbol, "long_venue": opp.long_venue, "net_apy_pct": opp.apy_difference,
         "funding_bps_per_hour": funding_bps_per_hour(opp.apy_difference),
-        "fee_cost_bps": fee_cost, "basis_now_bps": basis_now_bps, "basis_mean_bps": stats.mean_bps,
+        "fee_cost_bps": fee_cost, "hedge_crossing_bps": crossing, "tick_bps": tick_bps,
+        "half_spread_aster_bps": snapshot["half_spread_aster_bps"] if snapshot else None,
+        "half_spread_hl_bps": snapshot["half_spread_hl_bps"] if snapshot else None,
+        "basis_now_bps": basis_now_bps, "basis_mean_bps": stats.mean_bps,
         "basis_std_bps": stats.std_bps, "basis_samples": stats.n, "z": stats.z, "favorable_z": fz,
         "expected_reversion_bps": reversion, "effective_cost_bps": effective_cost,
         "breakeven_hours": hours, "max_breakeven_hours": exec_cfg.max_breakeven_hours,
@@ -408,6 +468,8 @@ def perform_hourly_rebalance(
     notifier: Optional["DiscordNotifier"] = None,
     exec_cfg: Optional[ExecutionConfig] = None,
     basis_tracker: Optional[BasisTracker] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
+    on_tick: Optional[Callable[[], None]] = None,
 ) -> None:
     """
     Main strategy function to rebalance the portfolio hourly to the best opportunity.
@@ -441,12 +503,13 @@ def perform_hourly_rebalance(
     gate_info = None
     for opp in actionable_opportunities:
         try:
-            basis_now = current_basis(aster_client, hyperliquid_client, opp.symbol)
+            snap = market_snapshot(aster_client, hyperliquid_client, opp.symbol)
+            basis_now = snap["basis_bps"]
         except Exception as exc:
-            logger.warning("Could not read basis for %s: %s", opp.symbol, exc)
+            logger.warning("Could not read books for %s: %s", opp.symbol, exc)
             continue
         basis_tracker.record_bps(opp.symbol, basis_now)  # keep history warm
-        info = evaluate_entry_gate(opp, exec_cfg, basis_tracker, basis_now)
+        info = evaluate_entry_gate(opp, exec_cfg, basis_tracker, basis_now, snap)
         if info["ok"]:
             best_opp, gate_info = opp, info
             break
@@ -522,13 +585,13 @@ def perform_hourly_rebalance(
         if notifier:
             notifier.notify_trade_closed(reason="rebalancing to better opportunity")
         close_positions_with_execution(aster_client, hyperliquid_client, exec_cfg, context="rebalance_close",
-                                       fallback_timeout_seconds=cleanup_timeout_seconds)
+                                       fallback_timeout_seconds=cleanup_timeout_seconds, on_tick=on_tick)
         time.sleep(15)  # Allow time for balance updates after closing positions.
 
     # 6. Execute the trade.
     execute_strategy(aster_client, hyperliquid_client, decision, notifier=notifier, exec_cfg=exec_cfg,
                      entry_basis_bps=gate_info["basis_now_bps"] if gate_info else None,
-                     time_budget_s=cleanup_timeout_seconds)
+                     time_budget_s=cleanup_timeout_seconds, should_abort=should_abort, on_tick=on_tick)
 
 
 def execute_strategy(
@@ -539,6 +602,8 @@ def execute_strategy(
     exec_cfg: Optional[ExecutionConfig] = None,
     entry_basis_bps: Optional[Decimal] = None,
     time_budget_s: float = 300.0,
+    should_abort: Optional[Callable[[], bool]] = None,
+    on_tick: Optional[Callable[[], None]] = None,
 ) -> None:
     """
     Executes a pre-determined strategy: sets leverage, then runs both legs through
@@ -561,7 +626,8 @@ def execute_strategy(
         Leg(long_venue_client, decision.long_symbol, "buy", decision.long_qty),
         Leg(short_venue_client, decision.short_symbol, "sell", decision.short_qty),
     ]
-    result = execute_pair(legs, exec_cfg, context=f"entry:{decision.opportunity.symbol}", max_total_s=float(time_budget_s))
+    result = execute_pair(legs, exec_cfg, context=f"entry:{decision.opportunity.symbol}", max_total_s=float(time_budget_s),
+                          should_abort=should_abort, on_tick=on_tick)
     logger.info("Execution result: %s", result.summary())
     if all(leg.filled == 0 for leg in legs):
         logger.warning("Nothing filled (anchor never traded); no position, no fees. Waiting for the next window.")
@@ -659,9 +725,10 @@ def close_positions_with_execution(
     *,
     context: str,
     fallback_timeout_seconds: int = 300,
+    on_tick: Optional[Callable[[], None]] = None,
 ) -> None:
-    """Close every open position with reduce-only legs through execute_pair; fall back to the
-    robust cleanup routine if anything is left."""
+    """Close every open position with reduce-only legs through execute_pair (anchor at the touch,
+    short patience: an exit is time-sensitive); fall back to the robust cleanup routine if anything is left."""
     legs: List[Leg] = []
     try:
         for pos in hyperliquid_client.get_all_positions():
@@ -685,7 +752,8 @@ def close_positions_with_execution(
                     hyperliquid_client.cancel_by_id(o["symbol"], str(o["id"]))
         except Exception as exc:
             logger.warning("Cancelling open orders before close failed: %s", exc)
-        result = execute_pair(legs, exec_cfg, context=context)
+        result = execute_pair(legs, exec_cfg, context=context, ladder=False, anchor_wait_s=exec_cfg.exit_max_wait_s,
+                              max_total_s=float(exec_cfg.exit_max_wait_s + 60), on_tick=on_tick)
         for leg in legs:
             if leg.filled > 0:
                 base = leg.symbol.split("/")[0].replace("USDT", "")
@@ -730,12 +798,21 @@ def check_basis_exit(
     gain = basis_gain_bps(Decimal(str(entry)), now_bps, long_venue)
     stats = tracker.stats(symbol, now_bps, exec_cfg.basis_window_hours, exec_cfg.basis_min_samples)
     fz = favorable_z(stats, long_venue)
-    threshold = Decimal(str(exec_cfg.exit_cost_bps + exec_cfg.basis_exit_min_gain_bps))
+    # Closing costs taker fees + crossing the tighter book, and gives up the funding this position
+    # would earn over the expected hold. The basis must pay for all of that, plus a margin.
+    try:
+        snap = market_snapshot(aster_client, hyperliquid_client, symbol)
+        crossing = hedge_cross_bps(snap)
+    except Exception:
+        crossing = Decimal(0)
+    funding_forgone = funding_bps_per_hour(Decimal(str(state.get("net_apy_pct") or 0))) * Decimal(str(exec_cfg.expected_hold_hours))
+    threshold = Decimal(str(exec_cfg.exit_cost_bps + exec_cfg.basis_exit_min_gain_bps)) + crossing + funding_forgone
     stretched = fz is not None and fz <= -Decimal(str(exec_cfg.z_exit))
     if not (gain >= threshold and stretched):
         return False
     log_event("basis_exit", symbol=symbol, long_venue=long_venue, entry_basis_bps=entry, basis_now_bps=now_bps,
-              gain_bps=gain, threshold_bps=threshold, favorable_z=fz, z=stats.z, basis_mean_bps=stats.mean_bps,
+              gain_bps=gain, threshold_bps=threshold, crossing_bps=crossing, funding_forgone_bps=funding_forgone,
+              favorable_z=fz, z=stats.z, basis_mean_bps=stats.mean_bps,
               basis_std_bps=stats.std_bps, samples=stats.n, net_apy_pct=state.get("net_apy_pct"))
     logger.warning("BASIS EXIT %s: gain %.1f bps >= %.1f bps and favorable z %.2f <= -%.2f. Closing pair.",
                    symbol, gain, threshold, fz, exec_cfg.z_exit)

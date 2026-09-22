@@ -24,7 +24,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .config import ExecutionConfig
 from .decision_log import log_event
@@ -134,11 +134,18 @@ def _round_qty(qty: Decimal, step: Decimal) -> Decimal:
 
 
 def passive_price(side: str, bids: List, asks: List, offset_bps: Decimal, tick: Decimal) -> Decimal:
-    """Touch improved by ``offset_bps`` in our favour: BUY below the bid, SELL above the ask. Never crosses."""
-    if side == "buy":
-        raw = bids[0][0] * (1 - offset_bps / Decimal(10_000))
-    else:
-        raw = asks[0][0] * (1 + offset_bps / Decimal(10_000))
+    """Touch improved by ``offset_bps`` in our favour: BUY below the bid, SELL above the ask. Never crosses.
+
+    When one tick is coarser than the requested offset (low-priced coins), the offset would round to a
+    whole tick, i.e. far more than asked, so we rest at the touch instead.
+    """
+    touch = bids[0][0] if side == "buy" else asks[0][0]
+    if offset_bps <= 0 or touch <= 0:
+        return round_to_tick(touch, tick, side)
+    tick_bps = tick / touch * Decimal(10_000)
+    if tick_bps >= offset_bps:
+        return round_to_tick(touch, tick, side)
+    raw = touch * (1 - offset_bps / Decimal(10_000)) if side == "buy" else touch * (1 + offset_bps / Decimal(10_000))
     return round_to_tick(raw, tick, side)
 
 
@@ -293,9 +300,26 @@ def ladder_offset_bps(cfg: ExecutionConfig, elapsed_s: float, horizon_s: float) 
     return Decimal(str(cfg.anchor_start_offset_bps)) * Decimal(steps - 1 - k) / Decimal(steps - 1)
 
 
-def execute_pair(legs: List[Leg], cfg: ExecutionConfig, *, context: str = "entry", max_total_s: float = 300.0) -> PairResult:
-    """Run both legs (or a single leg) to completion. Never raises; inspect ``PairResult``."""
+def execute_pair(
+    legs: List[Leg],
+    cfg: ExecutionConfig,
+    *,
+    context: str = "entry",
+    max_total_s: float = 300.0,
+    ladder: bool = True,
+    anchor_wait_s: Optional[float] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
+    on_tick: Optional[Callable[[], None]] = None,
+) -> PairResult:
+    """Run both legs (or a single leg) to completion. Never raises; inspect ``PairResult``.
+
+    ``ladder``        rest the anchor beyond the touch and tighten over time (entries); False = at the touch (exits)
+    ``anchor_wait_s`` override the anchor patience (defaults to cfg.anchor_max_wait_s)
+    ``should_abort``  polled every loop; True cancels the anchor, hedges whatever filled and returns
+    ``on_tick``       called about every 30 s while working (status snapshot, keeps the dashboard alive)
+    """
     start = time.time()
+    last_tick = start
     for leg in legs:
         _plan(leg, cfg, context, start)
 
@@ -321,17 +345,30 @@ def execute_pair(legs: List[Leg], cfg: ExecutionConfig, *, context: str = "entry
     # 1. Work the anchor. Passive anchors ladder in from ``anchor_start_offset_bps`` beyond the touch
     #    down to the touch over the horizon (bounded by the time we have in this window).
     tactic = anchor.plan.tactic if anchor.plan else "passive"
-    horizon = min(cfg.anchor_max_wait_s, max(max_total_s - 30.0, 30.0))
+    horizon = min(anchor_wait_s if anchor_wait_s is not None else cfg.anchor_max_wait_s, max(max_total_s - 30.0, 30.0))
     ladder_start = time.time()
     last_repost = 0.0
+    offset_now = (lambda elapsed: ladder_offset_bps(cfg, elapsed, horizon)) if ladder else (lambda elapsed: Decimal(0))
     try:
-        _submit(anchor, tactic, cfg, context, offset_bps=ladder_offset_bps(cfg, 0.0, horizon) if tactic == "passive" else Decimal(0))
+        _submit(anchor, tactic, cfg, context, offset_bps=offset_now(0.0) if tactic == "passive" else Decimal(0))
         anchor.deadline = time.time() + (horizon if tactic == "passive" else max(cfg.poll_interval_s * 2, 5.0))
     except Exception as exc:
         anchor.error = f"submit: {exc}"
         logger.error("[%s] anchor submit failed: %s", anchor.venue_name, exc)
 
     while time.time() - start < max_total_s and not anchor.error:
+        if on_tick and time.time() - last_tick >= 30:
+            try:
+                on_tick()
+            except Exception as exc:
+                logger.debug("on_tick failed: %s", exc)
+            last_tick = time.time()
+        if should_abort and should_abort():
+            _cancel(anchor)
+            anchor.error = "aborted by control"
+            log_event("note", message="execution aborted by safety switch; anchor cancelled", venue=anchor.venue_name,
+                      symbol=anchor.symbol, filled=anchor.filled, context=context)
+            break
         try:
             status = _refresh(anchor)
         except Exception as exc:
@@ -368,7 +405,7 @@ def execute_pair(legs: List[Leg], cfg: ExecutionConfig, *, context: str = "entry
             # (the touch moved, or the ladder stepped closer to the touch).
             try:
                 book = anchor.venue.get_book(anchor.symbol, depth=1)
-                offset = ladder_offset_bps(cfg, now - ladder_start, horizon)
+                offset = offset_now(now - ladder_start)
                 target = passive_price(anchor.side, book["bids"], book["asks"], offset, anchor.tick)
                 if anchor.order_price is not None and abs(target - anchor.order_price) >= anchor.tick and anchor.reposts < MAX_REPOSTS:
                     _cancel(anchor)

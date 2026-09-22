@@ -8,6 +8,7 @@ User=matthieu
 WorkingDirectory=/home/matthieu/Dex_perp_bot
 ExecStart=/home/matthieu/Dex_perp_bot/.venv/bin/python -m src.dex_perp_bot.dashboard
 Environment=DASHBOARD_PORT=8765
+Environment=ARB_LOGS_DIR=/home/matthieu/Blockchain_arbitrage/logs
 Restart=always
 RestartSec=10
 MemoryMax=200M

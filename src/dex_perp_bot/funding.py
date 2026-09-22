@@ -213,12 +213,12 @@ def fetch_and_compare_funding_rates(
         # payment; otherwise spread it over its interval. HL pays every hour.
         if aster_funding_imminent:
             apy_aster_basis = aster_rate.apy_4h
-            apy_basis = "4h"
+            apy_basis = f"aster {aster_rate.interval_hours}h"  # full Aster period counted: settlement within the hour
             imminent = True
             next_funding_ms = aster_rate.next_funding_time_ms
         else:
             apy_aster_basis = aster_rate.apy_1h
-            apy_basis = "1h"
+            apy_basis = f"hourly avg ({aster_rate.interval_hours}h)"  # Aster payment spread over its interval
             imminent = hl_funding_imminent
             next_funding_ms = hyperliquid_rate.next_funding_time_ms
         apy_hl_basis = hyperliquid_rate.apy_1h

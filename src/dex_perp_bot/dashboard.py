@@ -21,6 +21,8 @@ from .decision_log import read_events, summarize
 LOGS_DIR = Path("logs")
 STATUS_PATH = LOGS_DIR / "status.json"
 TRADES_PATH = LOGS_DIR / "trades.md"
+# Optional second data source: the Blockchain_arbitrage project's logs directory (detect-and-attribute mode).
+ARB_LOGS_DIR = Path(os.getenv("ARB_LOGS_DIR", "../Blockchain_arbitrage/logs"))
 
 _ENTRY_RE = re.compile(r"^- `(\d{2}:\d{2}:\d{2})` \*\*(OPEN|CLOSE) (\S+)\*\* (\S+) on \*\*([^*]+)\*\*")
 _QTY_RE = re.compile(r"Qty: ([\d.]+) \| Price: \$([\d.,]+) \| Notional: \$([\d,.]+)")
@@ -81,6 +83,61 @@ def tail_log(lines: int = 300) -> Dict[str, Any]:
     return {"file": path.name, "lines": chunk.splitlines()[-lines:]}
 
 
+def read_json(path: Path, missing: str) -> Dict[str, Any]:
+    if not path.exists():
+        return {"generated_at": None, "errors": [missing]}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"generated_at": None, "errors": [f"cannot read {path.name}: {exc}"]}
+
+
+def read_jsonl_tail(path: Path, limit: int) -> List[Dict[str, Any]]:
+    if not path.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        out.append(json.loads(line))
+                    except ValueError:
+                        continue
+    except OSError:
+        return []
+    return out[-limit:][::-1]
+
+
+def arb_control_path() -> Path:
+    return ARB_LOGS_DIR / "control.json"
+
+
+def read_arb_control() -> Dict[str, Any]:
+    p = arb_control_path()
+    if not p.exists():
+        return {"mode": "run"}
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        return d if d.get("mode") in ("run", "pause") else {"mode": "run"}
+    except (OSError, ValueError):
+        return {"mode": "run"}
+
+
+def write_arb_control(mode: str, by: str) -> Dict[str, Any]:
+    if mode not in ("run", "pause"):
+        raise ValueError(f"invalid arb mode {mode!r}")
+    from datetime import datetime, timezone
+    data = {"mode": mode, "requested_at": datetime.now(timezone.utc).isoformat(), "by": by}
+    p = arb_control_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(p)
+    return data
+
+
 def read_status() -> Dict[str, Any]:
     if not STATUS_PATH.exists():
         return {"generated_at": None, "errors": ["status.json not written yet - is the bot running?"]}
@@ -120,6 +177,12 @@ button{background:#232838;color:var(--fg);border:1px solid var(--line);border-ra
 <section class="wide"><h2>Last funding scan</h2><div class="overflow"><table id="opps"></table></div></section>
 <section class="wide"><h2>Execution &amp; signals <span class="muted" id="dsum"></span></h2><div class="overflow"><table id="tactics"></table></div><div class="overflow" style="margin-top:8px"><table id="events"></table></div></section>
 <section class="wide"><h2>Last trades</h2><div class="overflow"><table id="trades"></table></div></section>
+<section class="wide"><h2>On-chain arb (Base) · detect &amp; attribute <span class="muted" id="arbsum"></span>
+<span style="float:right"><span id="arbmode" class="mode"></span> <button id="arb-pause" onclick="setArbMode('pause')">Pause detector</button> <button id="arb-run" onclick="setArbMode('run')">Resume</button></span></h2>
+<div class="tiles" id="arbtiles"></div>
+<div class="overflow" style="margin-top:8px"><table id="arbtokens"></table></div>
+<div class="overflow" style="margin-top:8px"><table id="arbboard"></table></div>
+<div class="overflow" style="margin-top:8px"><table id="arbevents"></table></div></section>
 <section class="wide"><h2>Log <span class="muted" id="logfile"></span></h2><pre id="log"></pre></section>
 <section class="wide" id="errsec" hidden><h2>Status errors</h2><div class="err" id="errs"></div></section>
 </main>
@@ -168,6 +231,25 @@ let refresh=async function(){
   const ev=d.events||[];
   $('#events').innerHTML=ev.length?'<tr><th>Time</th><th>Kind</th><th>Details</th></tr>'+ev.map(e=>`<tr><td>${new Date(e.ts).toLocaleString()}</td><td>${e.kind}</td><td class=muted style="white-space:normal">${(keyf[e.kind]||Object.keys(e).filter(k=>k!=='ts'&&k!=='kind')).filter(k=>e[k]!=null&&e[k]!=='').map(k=>`<b>${k}</b>=${fmt(e[k])}`).join(' · ')}</td></tr>`).join('')
     :'<tr><td class=muted>No decisions logged yet</td></tr>';
+  try{
+    const ar=await j('/api/arb/status');const ac=await j('/api/arb/control');const ae=await j('/api/arb/events?limit=30');
+    const am=$('#arbmode');am.className='mode '+(ac.mode==='pause'?'pause':'run');am.textContent=ac.mode==='pause'?'PAUSED':'DETECTING';
+    $('#arb-pause').disabled=ac.mode==='pause';$('#arb-run').disabled=ac.mode!=='pause';
+    if(ar.errors&&ar.errors.length&&!ar.last_block){$('#arbsum').textContent='· '+ar.errors.join('; ');$('#arbtiles').innerHTML='';$('#arbtokens').innerHTML='';$('#arbboard').innerHTML='';$('#arbevents').innerHTML='';}
+    else{
+      const c=ar.counters||{};
+      $('#arbsum').textContent=`· status ${ago(ar.generated_at)} · block ${ar.last_block}`;
+      $('#arbtiles').innerHTML=[['Blocks seen',c.blocks],['Spreads ≥ '+ar.min_spread_pct+'%',c.spreads_opened],['Attributed',c.attributed],['Unattributed',c.unattributed],['Our block latency p50',ar.seen_latency_p50_s!=null?ar.seen_latency_p50_s+' s':'—']]
+        .map(([k,v])=>`<div class="tile"><div class="k">${k}</div><div class="v">${v??'—'}</div></div>`).join('');
+      const tk=ar.tokens||[];
+      $('#arbtokens').innerHTML=tk.length?'<tr><th>Token</th><th class=num>Pools</th><th>Buy on</th><th>Sell on</th><th class=num>Spread now</th><th>Open</th></tr>'+tk.map(t=>`<tr><td>${esc(t.symbol||'')}</td><td class=num>${t.n_pools}</td><td>${esc(t.buy_dex||'—')}</td><td>${esc(t.sell_dex||'—')}</td><td class="num ${t.spread_pct!=null&&t.spread_pct>=ar.min_spread_pct?'pos':'muted'}">${t.spread_pct!=null?t.spread_pct.toFixed(3)+'%':'—'}</td><td>${t.open?'<span class=pos>yes</span>':''}</td></tr>`).join(''):'';
+      const lb=ar.leaderboard||[];
+      $('#arbboard').innerHTML=lb.length?'<tr><th>Who takes the spreads (sender)</th><th class=num>Wins</th><th class=num>Both pools in one tx</th><th>Tokens</th><th>Contract</th></tr>'+lb.map(r=>`<tr><td class=muted>${esc(r.from)}</td><td class=num>${r.count}</td><td class=num>${r.both_pools}</td><td>${esc((r.tokens||[]).join(', '))}</td><td class=muted>${esc((r.contracts||[]).join(', '))}</td></tr>`).join(''):'<tr><td class=muted>No attributed spread yet</td></tr>';
+      const ak={spread_open:['symbol','block','spread_pct','buy_dex','sell_dex','seen_latency_s'],spread_close:['symbol','open_block','close_block','blocks_open','seconds_open','max_spread_pct','reason'],attribution:['symbol','open_block','close_block','n_candidates','our_first_sight_latency_s'],note:['message','tokens','pools']};
+      const fa=(e)=>{const ks=ak[e.kind]||Object.keys(e).filter(k=>k!=='ts'&&k!=='kind');let out=ks.filter(k=>e[k]!=null).map(k=>`<b>${k}</b>=${typeof e[k]==='number'?(Number.isInteger(e[k])?e[k]:e[k].toFixed(3)):esc(e[k])}`);if(e.kind==='attribution'&&e.winner)out.push(`<b>winner</b>=${esc(e.winner.from||'?')} → ${esc(e.winner.to||'?')} (tx #${e.winner.tx_index}, ${e.winner.priority_fee_gwei!=null?e.winner.priority_fee_gwei.toFixed(4)+' gwei':'—'})`);return out.join(' · ')};
+      $('#arbevents').innerHTML=ae.length?'<tr><th>Time</th><th>Kind</th><th>Details</th></tr>'+ae.map(e=>`<tr><td>${new Date(e.ts).toLocaleString()}</td><td>${e.kind}</td><td class=muted style="white-space:normal">${fa(e)}</td></tr>`).join(''):'<tr><td class=muted>No events yet</td></tr>';
+    }
+  }catch(err){$('#arbsum').textContent='· '+err}
   const lg=await j('/api/log?lines=300');
   $('#logfile').textContent=lg.file?'· '+lg.file:'';
   const pre=$('#log');pre.innerHTML=lg.lines.map(l=>{const m=l.match(/ (ERROR|WARNING) /);return `<span class="${m?'l-'+m[1]:''}">${esc(l)}</span>`}).join('\n');pre.scrollTop=pre.scrollHeight;
@@ -185,6 +267,12 @@ async function renderControl(){
   el.textContent={run:'TRADING',pause:'PAUSED',flatten:'FLATTENING…'}[c.mode]+(c.note?' · '+c.note:'');
   el.title=(c.requested_at?'since '+new Date(c.requested_at).toLocaleString()+' by '+c.by:'');
   $('#btn-pause').disabled=c.mode!=='run';$('#btn-flatten').disabled=c.mode==='flatten';$('#btn-run').disabled=c.mode==='run';
+}
+async function setArbMode(mode){
+  if(!confirm(mode==='pause'?'Pause the on-chain detector?':'Resume the on-chain detector?'))return;
+  const r=await fetch('/api/arb/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode})});
+  if(!r.ok){alert('failed: '+await r.text());return}
+  refresh();
 }
 const _refresh=refresh;refresh=async()=>{await renderControl();await _refresh()};
 refresh();setInterval(refresh,30000);
@@ -220,6 +308,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(tail_log(lines=int(qs.get("lines", ["300"])[0])))
             elif url.path == "/api/control":
                 self._json(read_control())
+            elif url.path == "/api/arb/status":
+                self._json(read_json(ARB_LOGS_DIR / "arb_status.json", f"arb_status.json not found in {ARB_LOGS_DIR} - is the detector running?"))
+            elif url.path == "/api/arb/events":
+                self._json(read_jsonl_tail(ARB_LOGS_DIR / "arb_events.jsonl", int(qs.get("limit", ["50"])[0])))
+            elif url.path == "/api/arb/control":
+                self._json(read_arb_control())
             elif url.path == "/api/decisions":
                 self._json({"summary": summarize(), "events": read_events(limit=int(qs.get("limit", ["100"])[0]))})
             elif url.path == "/api/health":
@@ -231,7 +325,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - http.server API
         url = urlparse(self.path)
-        if url.path != "/api/control":
+        if url.path not in ("/api/control", "/api/arb/control"):
             self._json({"error": "not found"}, 404)
             return
         try:
@@ -239,7 +333,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length) or b"{}")
             mode = str(payload.get("mode", ""))
             client = self.client_address[0]
-            state = write_control(mode, by=f"dashboard@{client}")
+            if url.path == "/api/arb/control":
+                state = write_arb_control(mode, by=f"dashboard@{client}")
+            else:
+                state = write_control(mode, by=f"dashboard@{client}")
             print(f"control -> {mode} (from {client})", flush=True)
             self._json(state)
         except ValueError as exc:

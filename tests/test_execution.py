@@ -15,7 +15,7 @@ def cfg(**over):
                 z_enter=1.0, z_exit=1.5, basis_exit_min_gain_bps=5, imbalance_threshold=0.3,
                 passive_max_wait_s=0.2, hedge_max_wait_s=0.05, cross_cap_bps=20, max_cross_half_spread_bps=3,
                 anchor_max_wait_s=0.3, anchor_start_offset_bps=0, anchor_steps=4, repost_min_interval_s=0,
-                poll_interval_s=0.01, sample_interval_s=30)
+                max_tick_bps=10, exit_max_wait_s=0.3, poll_interval_s=0.01, sample_interval_s=30)
     base.update(over)
     return ExecutionConfig(**base)
 
@@ -73,6 +73,8 @@ class FakeVenue:
                 and o["polls"] >= self.passive_fills_after and (at_touch or not self.fill_only_at_touch)):
             if self.partial and o["filled"] == 0 and o["qty"] > self.partial:
                 o["filled"] = self.partial
+            elif self.partial and o["filled"] > 0 and getattr(self, "partial_then_stall", False):
+                pass  # stays partially filled forever
             else:
                 o["filled"] = o["qty"]
                 o["status"] = "filled"
@@ -219,3 +221,38 @@ def test_anchor_deep_fill_keeps_the_offset():
     legs = [Leg(hl, "X", "buy", D("3000")), Leg(aster, "Y", "sell", D("3000"))]
     r = execute_pair(legs, cfg(anchor_start_offset_bps=8, anchor_steps=4, anchor_max_wait_s=5), max_total_s=60)
     assert r.hedged and legs[1].avg_price == D("0.16797") and legs[1].maker_filled == D("3000")
+
+
+def test_coarse_tick_rests_at_touch_not_a_full_tick_away():
+    from src.dex_perp_bot.execution import passive_price
+    # HMSTR-like: price 0.000178, tick 0.000001 = 56 bps. An 8 bps offset must not become 56 bps.
+    bids, asks = [(D("0.000178"), D("1"))], [(D("0.000179"), D("1"))]
+    assert passive_price("sell", bids, asks, D("8"), D("0.000001")) == D("0.000179")
+    assert passive_price("buy", bids, asks, D("8"), D("0.000001")) == D("0.000178")
+    # fine tick: offset applies
+    bids, asks = [(D("0.16754"), D("1"))], [(D("0.16783"), D("1"))]
+    assert passive_price("sell", bids, asks, D("8"), D("0.00001")) == D("0.16797")
+
+
+def test_abort_cancels_anchor_and_hedges_partial():
+    aster = FakeVenue("Aster", "0.16754", "0.16783", passive_fills_after=2)
+    aster.partial = D("1000"); aster.partial_then_stall = True  # fills 1000, then nothing more
+    hl = FakeVenue("Hyperliquid", "0.16761", "0.16763")
+    legs = [Leg(hl, "X", "buy", D("3000")), Leg(aster, "Y", "sell", D("3000"))]
+    flag = {"n": 0}
+    def should_abort():
+        flag["n"] += 1
+        return flag["n"] > 3
+    r = execute_pair(legs, cfg(anchor_max_wait_s=5), max_total_s=10, should_abort=should_abort)
+    a = legs[1]; h = legs[0]
+    assert a.error == "aborted by control" and aster.cancelled
+    assert h.filled == a.filled  # whatever filled on the anchor got hedged
+    assert not r.hedged or a.filled == D("3000")
+
+
+def test_exit_mode_no_ladder():
+    aster = FakeVenue("Aster", "0.16754", "0.16783", passive_fills_after=1)
+    hl = FakeVenue("Hyperliquid", "0.16761", "0.16763")
+    legs = [Leg(hl, "X", "sell", D("3000"), reduce_only=True), Leg(aster, "Y", "buy", D("3000"), reduce_only=True)]
+    r = execute_pair(legs, cfg(anchor_start_offset_bps=8, anchor_steps=4), max_total_s=5, ladder=False, anchor_wait_s=0.3)
+    assert r.hedged and aster.placed[0][2] == D("0.16754")  # at the bid, no offset

@@ -78,6 +78,8 @@ class ExecutionConfig:
     anchor_start_offset_bps: float  # anchor starts this far beyond the touch (better price for us) ...
     anchor_steps: int               # ... and tightens to the touch in this many equal time steps
     repost_min_interval_s: float    # do not chase the touch more often than this
+    max_tick_bps: float             # skip symbols whose price tick is coarser than this on either venue
+    exit_max_wait_s: float          # patience for the passive leg when closing (exits are time-sensitive)
     poll_interval_s: float
     sample_interval_s: float        # basis sampler cadence while idle
 
@@ -182,6 +184,8 @@ class Settings:
             anchor_start_offset_bps=float(os.getenv("EXEC_ANCHOR_START_OFFSET_BPS", "8")),
             anchor_steps=int(os.getenv("EXEC_ANCHOR_STEPS", "4")),
             repost_min_interval_s=float(os.getenv("EXEC_REPOST_MIN_INTERVAL_S", "10")),
+            max_tick_bps=float(os.getenv("EXEC_MAX_TICK_BPS", "10")),
+            exit_max_wait_s=float(os.getenv("EXEC_EXIT_MAX_WAIT_S", "120")),
             poll_interval_s=float(os.getenv("EXEC_POLL_INTERVAL_S", "3")),
             sample_interval_s=float(os.getenv("EXEC_SAMPLE_INTERVAL_S", "30")),
         )

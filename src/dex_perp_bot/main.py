@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import signal
 import sys
 import time
 from pathlib import Path
@@ -24,7 +25,7 @@ from src.dex_perp_bot.strategy import perform_hourly_rebalance, report_portfolio
 from src.dex_perp_bot.status import write_status
 from src.dex_perp_bot.control import CONTROL_POLL_SECONDS, read_control, write_control
 from src.dex_perp_bot.strategy import cleanup_all_open_positions_and_orders
-from src.dex_perp_bot.strategy import check_basis_exit, load_position_state, aster_symbol, hl_symbol
+from src.dex_perp_bot.strategy import check_basis_exit, load_position_state, aster_symbol, hl_symbol, cancel_all_open_orders
 from src.dex_perp_bot.basis import BasisTracker
 from src.dex_perp_bot import funding
 from src.dex_perp_bot.funding import fetch_and_compare_funding_rates
@@ -101,6 +102,15 @@ def main() -> int:
     hyperliquid_client = HyperliquidClient(settings.hyperliquid)
     aster_client = AsterClient(settings.aster, settings.aster_config)
 
+    # systemd stop / Ctrl+C: leave no resting order behind.
+    def _on_sigterm(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        cancel_all_open_orders(aster_client, hyperliquid_client, reason="startup: orphans from a previous run")
+    except Exception as exc:
+        logger.warning("Startup order cleanup failed: %s", exc)
+
     try:
         logger.info("Synchronizing time with Aster API...")
         aster_client.sync_time()
@@ -113,6 +123,12 @@ def main() -> int:
     started_at = datetime.now(timezone.utc)
     basis_tracker = BasisTracker()
     exec_cfg = settings.execution
+
+    def should_abort() -> bool:  # safety switch is honoured inside long executions too
+        return read_control().get("mode") != "run"
+
+    def on_tick() -> None:
+        write_status(aster_client, hyperliquid_client, started_at=started_at)
     logger.info("Execution config: %s", exec_cfg)
     try:  # seed the basis watchlist so z-scores exist by the first trading window
         fetch_and_compare_funding_rates(aster_client, hyperliquid_client, imminent_funding_minutes=60)
@@ -174,6 +190,8 @@ def main() -> int:
                             notifier=notifier,
                             exec_cfg=exec_cfg,
                             basis_tracker=basis_tracker,
+                            should_abort=should_abort,
+                            on_tick=on_tick,
                         )
                     else:
                         logger.warning("Insufficient capital to deploy. Awaiting next cycle.")
@@ -228,6 +246,10 @@ def main() -> int:
 
     except KeyboardInterrupt:
         logger.info("Shutdown signal received. Exiting.")
+        try:
+            cancel_all_open_orders(aster_client, hyperliquid_client, reason="shutdown")
+        except Exception as exc:
+            logger.warning("Shutdown order cleanup failed: %s", exc)
         notifier.notify_shutdown()
         return 0
 
