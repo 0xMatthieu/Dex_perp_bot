@@ -1,9 +1,18 @@
-"""Two-leg execution with per-leg tactics and hedge-first repricing.
+"""Two-leg execution: passive on the wide book first, then hedge by crossing the tight book.
 
-For each leg the plan is chosen from order-book imbalance and queue/flow
-(``microstructure.plan_leg``). Passive legs are post-only at the touch; if they
-have not filled by their deadline (or the other leg is already filled and we are
-naked), the remainder is crossed with an IOC limit under a slippage cap.
+Sequenced plan (``execute_pair``):
+
+1. Read both books. The leg on the venue with the **wider half-spread** is the *anchor*;
+   the other is the *hedge*.
+2. The anchor is worked passively (post-only at the touch, re-posted when the touch moves
+   away) for up to ``anchor_max_wait_s``. It only crosses if the planner says so *and* the
+   half-spread is at most ``max_cross_half_spread_bps`` (crossing a wide book pays the
+   spread, which dwarfs any timing edge).
+3. Every time the anchor's filled quantity grows, the hedge leg is sent as an IOC limit for
+   the new quantity (slippage capped at ``cross_cap_bps``). On a tight book this costs about
+   half a spread plus the taker fee and the naked exposure lasts seconds. Small partial fills
+   are batched until they are worth hedging, unless the anchor is done.
+4. If the anchor never fills, it is cancelled and nothing was paid.
 
 Every step is written to the decision log so fills can be audited later.
 """
@@ -20,9 +29,19 @@ from typing import Any, Dict, List, Optional
 from .config import ExecutionConfig
 from .decision_log import log_event
 from .exchanges.base import DexAPIError
-from .microstructure import LegPlan, cross_price, plan_leg, round_to_tick, slippage_bps
+from .microstructure import LegPlan, cross_price, half_spread_bps, plan_leg, round_to_tick, slippage_bps
 
 logger = logging.getLogger(__name__)
+
+MIN_HEDGE_SLICE_FRACTION = Decimal("0.2")  # hedge partial fills once they reach 20% of the leg
+MAX_REPOSTS = 200  # stop chasing the touch after this many re-posts; stay resting instead
+POST_ONLY_RETRIES = 3  # a post-only that would cross is rejected; re-read the book and try again
+_POST_ONLY_REJECT_MARKERS = ("-2026", "immediately", "post only", "post-only", "postonly", "alo", "would cross", "gtx")
+
+
+def is_post_only_rejection(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(m in msg for m in _POST_ONLY_REJECT_MARKERS)
 
 
 @dataclass
@@ -33,19 +52,25 @@ class Leg:
     quantity: Decimal
     reduce_only: bool = False
     # filled in during execution
+    role: str = ""  # "anchor" | "hedge"
     plan: Optional[LegPlan] = None
     reference_mid: Decimal = Decimal(0)
+    half_spread_bps: Decimal = Decimal(0)
     tick: Decimal = Decimal(0)
     step: Decimal = Decimal(0)
     order_id: Optional[str] = None
+    order_price: Optional[Decimal] = None
     current_tactic: str = ""
     filled: Decimal = Decimal(0)
     fill_notional: Decimal = Decimal(0)
+    maker_filled: Decimal = Decimal(0)
     placed_at: float = 0.0
+    first_fill_at: Optional[float] = None
     deadline: float = math.inf
     done: bool = False
     crossed_after_wait: bool = False
     cross_attempts: int = 0
+    reposts: int = 0
     error: Optional[str] = None
     fills_log: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -61,6 +86,13 @@ class Leg:
     def avg_price(self) -> Optional[Decimal]:
         return self.fill_notional / self.filled if self.filled > 0 else None
 
+    def est_fee_bps(self, cfg: ExecutionConfig) -> Optional[Decimal]:
+        """Blended fee estimate from the maker/taker split of the fills."""
+        if self.filled <= 0:
+            return None
+        maker = self.maker_filled / self.filled
+        return maker * Decimal(str(cfg.fee_bps(self.venue_name, True))) + (1 - maker) * Decimal(str(cfg.fee_bps(self.venue_name, False)))
+
 
 @dataclass
 class PairResult:
@@ -74,9 +106,10 @@ class PairResult:
             "elapsed_s": round(self.elapsed_s, 1),
             "legs": [
                 {
-                    "venue": l.venue_name, "symbol": l.symbol, "side": l.side, "qty": l.quantity,
+                    "venue": l.venue_name, "symbol": l.symbol, "side": l.side, "role": l.role, "qty": l.quantity,
                     "filled": l.filled, "avg_price": l.avg_price, "tactic": l.current_tactic,
-                    "planned": l.plan.tactic if l.plan else None, "error": l.error,
+                    "planned": l.plan.tactic if l.plan else None, "half_spread_bps": l.half_spread_bps,
+                    "error": l.error,
                 }
                 for l in self.legs
             ],
@@ -100,51 +133,82 @@ def _round_qty(qty: Decimal, step: Decimal) -> Decimal:
     return (qty // step) * step
 
 
-def _submit(leg: Leg, tactic: str, cfg: ExecutionConfig, context: str) -> None:
-    """Place (or re-place) the remaining quantity of a leg with the given tactic."""
+def passive_price(side: str, bids: List, asks: List, offset_bps: Decimal, tick: Decimal) -> Decimal:
+    """Touch improved by ``offset_bps`` in our favour: BUY below the bid, SELL above the ask. Never crosses."""
+    if side == "buy":
+        raw = bids[0][0] * (1 - offset_bps / Decimal(10_000))
+    else:
+        raw = asks[0][0] * (1 + offset_bps / Decimal(10_000))
+    return round_to_tick(raw, tick, side)
+
+
+def _submit(leg: Leg, tactic: str, cfg: ExecutionConfig, context: str, qty: Optional[Decimal] = None,
+            offset_bps: Decimal = Decimal(0)) -> None:
+    """Place (or re-place) ``qty`` (default: the remaining quantity) of a leg with the given tactic."""
     book = leg.venue.get_book(leg.symbol, depth=5)
     bids, asks = book["bids"], book["asks"]
     if not bids or not asks:
         raise DexAPIError(f"Empty book for {leg.symbol} on {leg.venue_name}")
-    qty = _round_qty(leg.remaining, leg.step)
+    qty = _round_qty(qty if qty is not None else leg.remaining, leg.step)
     if qty <= 0:
-        leg.done = True
         return
     if tactic == "passive":
-        price = bids[0][0] if leg.side == "buy" else asks[0][0]
-        price = round_to_tick(price, leg.tick, leg.side)
-        order_id = leg.venue.place_limit(leg.symbol, leg.side, qty, price, post_only=True, reduce_only=leg.reduce_only)
-        leg.deadline = time.time() + cfg.passive_max_wait_s
+        attempt = 0
+        while True:
+            price = passive_price(leg.side, bids, asks, offset_bps, leg.tick)
+            try:
+                order_id = leg.venue.place_limit(leg.symbol, leg.side, qty, price, post_only=True, reduce_only=leg.reduce_only)
+                break
+            except Exception as exc:
+                attempt += 1
+                if not is_post_only_rejection(exc) or attempt > POST_ONLY_RETRIES:
+                    raise
+                # The touch moved through our price between the book read and the send: refresh and re-post.
+                logger.info("[%s] post-only %s @ %s rejected (would cross); re-reading book (attempt %d/%d)",
+                            leg.venue_name, leg.side.upper(), price, attempt, POST_ONLY_RETRIES)
+                log_event("note", message="post-only rejected, re-posting at new touch", venue=leg.venue_name,
+                          symbol=leg.symbol, side=leg.side, price=price, attempt=attempt, context=context)
+                book = leg.venue.get_book(leg.symbol, depth=5)
+                bids, asks = book["bids"], book["asks"]
+                if not bids or not asks:
+                    raise DexAPIError(f"Empty book for {leg.symbol} on {leg.venue_name}")
+        leg.reposts += attempt
     else:
         price = cross_price(leg.side, bids[0][0], asks[0][0], Decimal(str(cfg.cross_cap_bps)), leg.tick)
         order_id = leg.venue.place_limit(leg.symbol, leg.side, qty, price, ioc=True, reduce_only=leg.reduce_only)
         leg.cross_attempts += 1
-        leg.deadline = time.time() + max(cfg.poll_interval_s * 2, 5.0)
     leg.order_id = order_id
+    leg.order_price = price
     leg.current_tactic = tactic
     leg.placed_at = leg.placed_at or time.time()
-    logger.info("[%s] %s %s %s @ %s (%s, %s) order %s", leg.venue_name, leg.side.upper(), qty, leg.symbol, price, tactic, context, order_id)
-    log_event("leg_order", venue=leg.venue_name, symbol=leg.symbol, side=leg.side, qty=qty, price=price,
-              tactic=tactic, context=context, order_id=order_id, best_bid=bids[0][0], best_ask=asks[0][0])
+    logger.info("[%s] %s %s %s @ %s (%s %s, %s) order %s", leg.venue_name, leg.side.upper(), qty, leg.symbol, price,
+                leg.role, tactic, context, order_id)
+    log_event("leg_order", venue=leg.venue_name, symbol=leg.symbol, side=leg.side, role=leg.role, qty=qty, price=price,
+              tactic=tactic, context=context, order_id=order_id, best_bid=bids[0][0], best_ask=asks[0][0],
+              half_spread_bps=half_spread_bps(bids, asks), offset_bps=offset_bps)
 
 
 def _refresh(leg: Leg) -> str:
     """Poll the venue and fold new fills into the leg. Returns status open|filled|canceled."""
+    if leg.order_id is None:
+        return "canceled"
     state = leg.venue.get_order_state(leg.symbol, leg.order_id)
     filled_now = state.get("filled") or Decimal(0)
     avg = state.get("avg_price")
-    # Fold in incremental fills for this order id (orders are replaced, so track per order).
-    prev = sum((f["filled"] for f in leg.fills_log if f["order_id"] == leg.order_id), Decimal(0))
+    prev = sum((f["delta"] for f in leg.fills_log if f["order_id"] == leg.order_id), Decimal(0))
     delta = filled_now - prev
-    if delta > 0 and not avg:  # last resort so a fill is never dropped from the accounting
-        avg = leg.reference_mid
-        logger.warning("[%s] order %s filled %s without an average price; using reference mid", leg.venue_name, leg.order_id, delta)
-    if delta > 0 and avg:
+    if delta > 0:
+        if not avg:  # last resort so a fill is never dropped from the accounting
+            avg = leg.order_price or leg.reference_mid
+            logger.warning("[%s] order %s filled %s without an average price; using order price", leg.venue_name, leg.order_id, delta)
         leg.filled += delta
         leg.fill_notional += delta * avg
-        leg.fills_log.append({"order_id": leg.order_id, "filled": filled_now, "avg_price": avg, "tactic": leg.current_tactic})
+        if leg.current_tactic == "passive":
+            leg.maker_filled += delta
+        leg.first_fill_at = leg.first_fill_at or time.time()
+        leg.fills_log.append({"order_id": leg.order_id, "delta": delta, "avg_price": avg, "tactic": leg.current_tactic})
     status = state.get("status", "open")
-    if leg.remaining <= 0 or (status == "filled"):
+    if leg.remaining <= 0:
         leg.done = True
         status = "filled"
     return status
@@ -161,112 +225,224 @@ def _cancel(leg: Leg) -> None:
         _refresh(leg)  # capture any fill that landed before the cancel
     except Exception as exc:
         logger.warning("[%s] post-cancel refresh failed: %s", leg.venue_name, exc)
+    leg.order_id = None
 
 
-def _finish_leg(leg: Leg, context: str) -> None:
-    wait_s = (time.time() - leg.placed_at) if leg.placed_at else None
+def _finish_leg(leg: Leg, cfg: ExecutionConfig, context: str) -> None:
+    wait_s = ((leg.first_fill_at or time.time()) - leg.placed_at) if leg.placed_at else None
     slip = slippage_bps(leg.side, leg.avg_price, leg.reference_mid) if leg.avg_price else None
     log_event(
-        "leg_fill", venue=leg.venue_name, symbol=leg.symbol, side=leg.side, qty=leg.quantity, filled=leg.filled,
-        avg_price=leg.avg_price, reference_mid=leg.reference_mid, slippage_bps=slip, wait_s=wait_s,
-        planned_tactic=leg.plan.tactic if leg.plan else None, final_tactic=leg.current_tactic,
-        crossed_after_wait=leg.crossed_after_wait, cross_attempts=leg.cross_attempts,
-        imbalance=leg.plan.imbalance if leg.plan else None, queue_qty=leg.plan.queue_qty if leg.plan else None,
+        "leg_fill", venue=leg.venue_name, symbol=leg.symbol, side=leg.side, role=leg.role, qty=leg.quantity,
+        filled=leg.filled, avg_price=leg.avg_price, reference_mid=leg.reference_mid, slippage_bps=slip,
+        est_fee_bps=leg.est_fee_bps(cfg), maker_fraction=(leg.maker_filled / leg.filled) if leg.filled else None,
+        wait_s=wait_s, planned_tactic=leg.plan.tactic if leg.plan else None, final_tactic=leg.current_tactic,
+        crossed_after_wait=leg.crossed_after_wait, cross_attempts=leg.cross_attempts, reposts=leg.reposts,
+        half_spread_bps=leg.half_spread_bps, imbalance=leg.plan.imbalance if leg.plan else None,
+        queue_qty=leg.plan.queue_qty if leg.plan else None,
         expected_wait_s=leg.plan.expected_wait_s if leg.plan else None, error=leg.error, context=context,
     )
 
 
+def _plan(leg: Leg, cfg: ExecutionConfig, context: str, now: float) -> None:
+    try:
+        leg.tick, leg.step = leg.venue.get_increments(leg.symbol)
+        book = leg.venue.get_book(leg.symbol, depth=5)
+        trades = leg.venue.get_recent_trades(leg.symbol, limit=100)
+        leg.reference_mid = _mid(book)
+        leg.half_spread_bps = half_spread_bps(book["bids"], book["asks"])
+        leg.plan = plan_leg(
+            leg.side, book["bids"], book["asks"], trades, now_s=now,
+            imbalance_threshold=Decimal(str(cfg.imbalance_threshold)), max_wait_s=cfg.passive_max_wait_s,
+            max_cross_half_spread_bps=Decimal(str(cfg.max_cross_half_spread_bps)),
+        )
+    except Exception as exc:
+        leg.error = f"plan: {exc}"
+        leg.plan = LegPlan("passive", f"planning failed ({exc})", Decimal(0), Decimal(0), Decimal(0), 0.0)
+        logger.warning("[%s] planning %s failed: %s", leg.venue_name, leg.symbol, exc)
+
+
+def _hedge_slice(anchor: Leg, hedge: Leg, cfg: ExecutionConfig, context: str) -> None:
+    """Cross the hedge leg for whatever the anchor has filled and we have not hedged yet."""
+    target = min(anchor.filled, hedge.quantity)
+    outstanding = target - hedge.filled
+    slice_qty = _round_qty(outstanding, hedge.step)
+    if slice_qty <= 0:
+        return
+    if not anchor.done and slice_qty < hedge.quantity * MIN_HEDGE_SLICE_FRACTION:
+        return  # batch small partials until they are worth a taker order
+    if hedge.cross_attempts >= 6:
+        hedge.error = "cross attempts exhausted"
+        return
+    hedge.crossed_after_wait = False
+    _submit(hedge, "cross", cfg, f"{context}:hedge", qty=slice_qty)
+    # IOC resolves immediately; fold the result in now.
+    try:
+        _refresh(hedge)
+    except Exception as exc:
+        logger.warning("[%s] hedge refresh failed: %s", hedge.venue_name, exc)
+
+
+def ladder_offset_bps(cfg: ExecutionConfig, elapsed_s: float, horizon_s: float) -> Decimal:
+    """Offset beyond the touch as a function of time: start at ``anchor_start_offset_bps`` and step down
+    linearly to 0 (the touch) over ``anchor_steps`` equal slices of ``horizon_s``."""
+    steps = max(1, cfg.anchor_steps)
+    if horizon_s <= 0 or cfg.anchor_start_offset_bps <= 0 or steps == 1:
+        return Decimal(0)
+    k = min(steps - 1, int(elapsed_s / (horizon_s / steps)))
+    # k = 0 -> full offset, k = steps-1 (last slice) -> at the touch
+    return Decimal(str(cfg.anchor_start_offset_bps)) * Decimal(steps - 1 - k) / Decimal(steps - 1)
+
+
 def execute_pair(legs: List[Leg], cfg: ExecutionConfig, *, context: str = "entry", max_total_s: float = 300.0) -> PairResult:
-    """Run both legs to completion (or timeout). Never raises; inspect ``PairResult``."""
+    """Run both legs (or a single leg) to completion. Never raises; inspect ``PairResult``."""
     start = time.time()
-    now = start
-
-    # 1. Plan each leg from its own book and trade flow.
     for leg in legs:
-        try:
-            leg.tick, leg.step = leg.venue.get_increments(leg.symbol)
-            book = leg.venue.get_book(leg.symbol, depth=5)
-            trades = leg.venue.get_recent_trades(leg.symbol, limit=100)
-            leg.reference_mid = _mid(book)
-            leg.plan = plan_leg(
-                leg.side, book["bids"], book["asks"], trades, now_s=now,
-                imbalance_threshold=Decimal(str(cfg.imbalance_threshold)), max_wait_s=cfg.passive_max_wait_s,
-            )
-            log_event("leg_plan", venue=leg.venue_name, symbol=leg.symbol, side=leg.side, qty=leg.quantity,
-                      tactic=leg.plan.tactic, reason=leg.plan.reason, imbalance=leg.plan.imbalance,
-                      queue_qty=leg.plan.queue_qty, flow_rate=leg.plan.flow_rate,
-                      expected_wait_s=leg.plan.expected_wait_s, mid=leg.reference_mid, context=context)
-        except Exception as exc:
-            leg.error = f"plan: {exc}"
-            leg.plan = LegPlan("cross", f"planning failed ({exc}); crossing", Decimal(0), Decimal(0), Decimal(0), 0.0)
-            logger.warning("[%s] planning %s failed: %s -> cross", leg.venue_name, leg.symbol, exc)
+        _plan(leg, cfg, context, start)
 
-    # 2. Submit.
-    for leg in legs:
-        try:
-            _submit(leg, leg.plan.tactic if leg.plan else "cross", cfg, context)
-        except Exception as exc:
-            leg.error = f"submit: {exc}"
-            logger.error("[%s] submit %s failed: %s", leg.venue_name, leg.symbol, exc)
+    if len(legs) == 1:
+        legs[0].role = "anchor"
+        _work_single(legs[0], cfg, context, max_total_s)
+        _finish_leg(legs[0], cfg, context)
+        result = PairResult(legs=legs, hedged=legs[0].remaining <= legs[0].step, elapsed_s=time.time() - start)
+        log_event("pair_result", context=context, **result.summary())
+        return result
 
-    # 3. Manage until both done or overall timeout.
-    while time.time() - start < max_total_s:
-        open_legs = [l for l in legs if not l.done and l.order_id]
-        if not open_legs and all(l.done or l.error for l in legs):
-            break
-        any_filled = any(l.filled > 0 for l in legs)
-        for leg in open_legs:
+    # Anchor = wider half-spread (ties -> first leg). Hedge = the other one.
+    anchor, hedge = sorted(legs, key=lambda l: l.half_spread_bps, reverse=True)[:2]
+    anchor.role, hedge.role = "anchor", "hedge"
+    log_event("leg_plan", venue=anchor.venue_name, symbol=anchor.symbol, side=anchor.side, role="anchor",
+              qty=anchor.quantity, tactic=anchor.plan.tactic, reason=anchor.plan.reason, imbalance=anchor.plan.imbalance,
+              queue_qty=anchor.plan.queue_qty, flow_rate=anchor.plan.flow_rate, expected_wait_s=anchor.plan.expected_wait_s,
+              half_spread_bps=anchor.half_spread_bps, mid=anchor.reference_mid, context=context)
+    log_event("leg_plan", venue=hedge.venue_name, symbol=hedge.symbol, side=hedge.side, role="hedge",
+              qty=hedge.quantity, tactic="cross", reason=f"hedge on the tighter book (half-spread {hedge.half_spread_bps:.1f} bps vs anchor {anchor.half_spread_bps:.1f} bps)",
+              imbalance=hedge.plan.imbalance, half_spread_bps=hedge.half_spread_bps, mid=hedge.reference_mid, context=context)
+
+    # 1. Work the anchor. Passive anchors ladder in from ``anchor_start_offset_bps`` beyond the touch
+    #    down to the touch over the horizon (bounded by the time we have in this window).
+    tactic = anchor.plan.tactic if anchor.plan else "passive"
+    horizon = min(cfg.anchor_max_wait_s, max(max_total_s - 30.0, 30.0))
+    ladder_start = time.time()
+    last_repost = 0.0
+    try:
+        _submit(anchor, tactic, cfg, context, offset_bps=ladder_offset_bps(cfg, 0.0, horizon) if tactic == "passive" else Decimal(0))
+        anchor.deadline = time.time() + (horizon if tactic == "passive" else max(cfg.poll_interval_s * 2, 5.0))
+    except Exception as exc:
+        anchor.error = f"submit: {exc}"
+        logger.error("[%s] anchor submit failed: %s", anchor.venue_name, exc)
+
+    while time.time() - start < max_total_s and not anchor.error:
+        try:
+            status = _refresh(anchor)
+        except Exception as exc:
+            logger.warning("[%s] poll failed: %s", anchor.venue_name, exc)
+            time.sleep(cfg.poll_interval_s)
+            continue
+        # 2. Hedge whatever is filled so far.
+        if anchor.filled > hedge.filled:
             try:
-                status = _refresh(leg)
+                _hedge_slice(anchor, hedge, cfg, context)
             except Exception as exc:
-                logger.warning("[%s] poll %s failed: %s", leg.venue_name, leg.order_id, exc)
-                continue
-            if leg.done:
-                continue
-            now = time.time()
-            # Hedge urgency: the other leg has (partially) filled and we are still resting.
-            other_filled = any(l is not leg and l.filled > 0 for l in legs)
-            if other_filled and leg.current_tactic == "passive":
-                leg.deadline = min(leg.deadline, leg.placed_at + cfg.hedge_max_wait_s)
-            if status == "canceled" or now >= leg.deadline:
-                # Passive expired (or IOC left a remainder): cross the rest.
-                if leg.current_tactic == "passive":
-                    _cancel(leg)
-                    if leg.done:
-                        continue
-                    leg.crossed_after_wait = True
-                if leg.cross_attempts >= 4:
-                    leg.error = "cross attempts exhausted"
-                    leg.done = True
-                    continue
+                hedge.error = f"cross: {exc}"
+                logger.error("[%s] hedge failed: %s", hedge.venue_name, exc)
+        if anchor.done:
+            break
+        now = time.time()
+        if status == "canceled":  # IOC remainder or venue-side cancel
+            if anchor.current_tactic == "cross" and anchor.cross_attempts < 4 and anchor.half_spread_bps <= Decimal(str(cfg.max_cross_half_spread_bps)):
                 try:
-                    _submit(leg, "cross", cfg, f"{context}:reprice" + (":hedge" if other_filled else ""))
+                    _submit(anchor, "cross", cfg, f"{context}:reprice")
+                    anchor.deadline = now + max(cfg.poll_interval_s * 2, 5.0)
                 except Exception as exc:
-                    leg.error = f"cross: {exc}"
-                    leg.done = True
-        # Retry legs whose initial submit failed while the other side has exposure.
-        for leg in legs:
-            if leg.error and leg.error.startswith("submit:") and not leg.order_id and any_filled and leg.cross_attempts < 2:
-                try:
-                    _submit(leg, "cross", cfg, f"{context}:retry")
-                    leg.error = None
-                except Exception as exc:
-                    leg.error = f"submit: {exc}"
+                    anchor.error = f"cross: {exc}"
+            else:
+                anchor.order_id = None
+                anchor.error = anchor.error or "order cancelled by venue"
+                break
+        elif now >= anchor.deadline:
+            _cancel(anchor)
+            anchor.error = "anchor timeout"
+            break
+        elif anchor.current_tactic == "passive" and now - last_repost >= cfg.repost_min_interval_s:
+            # Re-post when our resting price drifts a tick or more from the ladder target
+            # (the touch moved, or the ladder stepped closer to the touch).
+            try:
+                book = anchor.venue.get_book(anchor.symbol, depth=1)
+                offset = ladder_offset_bps(cfg, now - ladder_start, horizon)
+                target = passive_price(anchor.side, book["bids"], book["asks"], offset, anchor.tick)
+                if anchor.order_price is not None and abs(target - anchor.order_price) >= anchor.tick and anchor.reposts < MAX_REPOSTS:
+                    _cancel(anchor)
+                    if not anchor.done:
+                        anchor.reposts += 1
+                        last_repost = now
+                        _submit(anchor, "passive", cfg, f"{context}:repost", offset_bps=offset)
+            except Exception as exc:
+                logger.warning("[%s] repost check failed: %s", anchor.venue_name, exc)
         time.sleep(cfg.poll_interval_s)
 
-    # 4. Final cleanup: cancel anything still resting, record outcomes.
-    for leg in legs:
-        if not leg.done and leg.order_id:
-            _cancel(leg)
-            leg.done = True
-            if leg.remaining > 0 and not leg.error:
-                leg.error = "timeout"
-        _finish_leg(leg, context)
+    # 3. Final hedge for anything filled but not yet hedged; cancel anything resting.
+    if anchor.order_id and not anchor.done:
+        _cancel(anchor)
+    if anchor.filled > hedge.filled:
+        for _ in range(3):
+            try:
+                _hedge_slice(anchor, hedge, cfg, f"{context}:final")
+            except Exception as exc:
+                hedge.error = f"cross: {exc}"
+                break
+            if hedge.filled >= min(anchor.filled, hedge.quantity) - hedge.step:
+                break
+            time.sleep(cfg.poll_interval_s)
+    if anchor.error == "anchor timeout" and anchor.filled == 0:
+        log_event("note", message="anchor never filled; entry abandoned without fees", venue=anchor.venue_name,
+                  symbol=anchor.symbol, context=context, waited_s=round(time.time() - start, 1))
 
-    filled_notionals = [l.fill_notional for l in legs]
-    hedged = all(l.remaining <= l.step for l in legs) and (
-        not any(filled_notionals) or (max(filled_notionals) - min(filled_notionals)) <= max(filled_notionals) * Decimal("0.03")
-    )
+    for leg in legs:
+        leg.done = True
+        _finish_leg(leg, cfg, context)
+
+    notionals = [anchor.fill_notional, hedge.fill_notional]
+    hedged = anchor.filled > 0 and abs(anchor.fill_notional - hedge.fill_notional) <= max(notionals) * Decimal("0.03") \
+        and all(l.remaining <= l.step for l in legs)
     result = PairResult(legs=legs, hedged=hedged, elapsed_s=time.time() - start)
     log_event("pair_result", context=context, **result.summary())
     return result
+
+
+def _work_single(leg: Leg, cfg: ExecutionConfig, context: str, max_total_s: float) -> None:
+    """One leg on its own (e.g. closing a lone position): passive with patience, then cross."""
+    start = time.time()
+    tactic = leg.plan.tactic if leg.plan else "passive"
+    try:
+        _submit(leg, tactic, cfg, context)
+        leg.deadline = time.time() + (cfg.passive_max_wait_s if tactic == "passive" else 5.0)
+    except Exception as exc:
+        leg.error = f"submit: {exc}"
+        return
+    while time.time() - start < max_total_s and not leg.done:
+        try:
+            status = _refresh(leg)
+        except Exception as exc:
+            logger.warning("[%s] poll failed: %s", leg.venue_name, exc)
+            time.sleep(cfg.poll_interval_s)
+            continue
+        if leg.done:
+            break
+        if status == "canceled" or time.time() >= leg.deadline:
+            if leg.current_tactic == "passive":
+                _cancel(leg)
+                leg.crossed_after_wait = True
+            if leg.done:
+                break
+            if leg.cross_attempts >= 4:
+                leg.error = "cross attempts exhausted"
+                break
+            try:
+                _submit(leg, "cross", cfg, f"{context}:reprice")
+                leg.deadline = time.time() + 5.0
+            except Exception as exc:
+                leg.error = f"cross: {exc}"
+                break
+        time.sleep(cfg.poll_interval_s)
+    if leg.order_id and not leg.done:
+        _cancel(leg)

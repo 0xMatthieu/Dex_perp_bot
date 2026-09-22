@@ -163,6 +163,17 @@ class LegPlan:
     queue_qty: Decimal
     flow_rate: Decimal
     expected_wait_s: float
+    half_spread_bps: Decimal = Decimal(0)
+
+
+def half_spread_bps(bids: Sequence[Level], asks: Sequence[Level]) -> Decimal:
+    """Half the bid-ask spread in bps of mid: what a taker pays versus mid on top of fees."""
+    if not bids or not asks:
+        return Decimal(0)
+    mid = (bids[0][0] + asks[0][0]) / 2
+    if mid == 0:
+        return Decimal(0)
+    return (asks[0][0] - bids[0][0]) / 2 / mid * BPS
 
 
 def plan_leg(
@@ -174,18 +185,23 @@ def plan_leg(
     now_s: float,
     imbalance_threshold: Decimal,
     max_wait_s: float,
+    max_cross_half_spread_bps: Optional[Decimal] = None,
     flow_window_s: float = 120.0,
     levels: int = 5,
 ) -> LegPlan:
-    """Decide passive vs cross for one leg from imbalance and queue/flow.
+    """Decide passive vs cross for one leg from imbalance, queue/flow and spread width.
 
     BUY: strong positive imbalance (buyers pushing) -> price about to move up, cross now.
          Otherwise join the best bid; but if the queue there will take longer than
          ``max_wait_s`` to clear, cross instead.
     SELL: mirrored.
+    Crossing is only allowed when the half-spread is at most ``max_cross_half_spread_bps``:
+    on a wide book the taker pays the spread, which dwarfs any timing edge.
     """
     side = side.lower()
     imb = imbalance(bids, asks, levels)
+    hs = half_spread_bps(bids, asks)
+    cross_affordable = max_cross_half_spread_bps is None or hs <= max_cross_half_spread_bps
     if side == "buy":
         best = bids[0][0] if bids else Decimal(0)
         q = queue_ahead(bids, best)
@@ -197,11 +213,13 @@ def plan_leg(
         rate = aggressive_flow_rate(trades, "buy", flow_window_s, now_s)
         adverse = imb <= -imbalance_threshold
     wait = expected_wait_s(q, rate)
-    if adverse:
-        return LegPlan("cross", f"imbalance {imb:+.2f} against a passive {side}", imb, q, rate, wait)
-    if wait > max_wait_s:
-        return LegPlan("cross", f"queue {q} at touch, flow {rate:.4f}/s -> wait {wait:.0f}s > {max_wait_s:.0f}s", imb, q, rate, wait)
-    return LegPlan("passive", f"imbalance {imb:+.2f}, expected wait {wait:.0f}s", imb, q, rate, wait)
+    if adverse and cross_affordable:
+        return LegPlan("cross", f"imbalance {imb:+.2f} against a passive {side}, half-spread {hs:.1f} bps", imb, q, rate, wait, hs)
+    if wait > max_wait_s and cross_affordable:
+        return LegPlan("cross", f"queue {q} at touch, flow {rate:.4f}/s -> wait {wait:.0f}s > {max_wait_s:.0f}s, half-spread {hs:.1f} bps", imb, q, rate, wait, hs)
+    if (adverse or wait > max_wait_s) and not cross_affordable:
+        return LegPlan("passive", f"would cross (imbalance {imb:+.2f}, wait {wait:.0f}s) but half-spread {hs:.1f} bps > {max_cross_half_spread_bps} bps", imb, q, rate, wait, hs)
+    return LegPlan("passive", f"imbalance {imb:+.2f}, expected wait {wait:.0f}s, half-spread {hs:.1f} bps", imb, q, rate, wait, hs)
 
 
 # ---------------------------------------------------------------------------

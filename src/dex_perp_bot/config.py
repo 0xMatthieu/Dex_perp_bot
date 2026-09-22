@@ -73,6 +73,11 @@ class ExecutionConfig:
     passive_max_wait_s: float       # give a passive leg this long before crossing
     hedge_max_wait_s: float         # once the other leg is filled, cross this fast
     cross_cap_bps: float            # slippage cap for IOC crossing orders
+    max_cross_half_spread_bps: float  # never cross a book whose half-spread is wider than this (except to hedge)
+    anchor_max_wait_s: float        # patience for the passive leg on the wide book before giving up the entry
+    anchor_start_offset_bps: float  # anchor starts this far beyond the touch (better price for us) ...
+    anchor_steps: int               # ... and tightens to the touch in this many equal time steps
+    repost_min_interval_s: float    # do not chase the touch more often than this
     poll_interval_s: float
     sample_interval_s: float        # basis sampler cadence while idle
 
@@ -84,6 +89,11 @@ class ExecutionConfig:
     @property
     def exit_cost_bps(self) -> float:
         return self.hl_taker_bps + self.aster_taker_bps
+
+    def fee_bps(self, venue_name: str, maker: bool) -> float:
+        if venue_name == "Hyperliquid":
+            return self.hl_maker_bps if maker else self.hl_taker_bps
+        return self.aster_maker_bps if maker else self.aster_taker_bps
 
 
 @dataclass(frozen=True)
@@ -155,7 +165,7 @@ class Settings:
             hl_maker_bps=float(os.getenv("FEE_HL_MAKER_BPS", "1.5")),
             hl_taker_bps=float(os.getenv("FEE_HL_TAKER_BPS", "4.5")),
             aster_maker_bps=float(os.getenv("FEE_ASTER_MAKER_BPS", "1.0")),
-            aster_taker_bps=float(os.getenv("FEE_ASTER_TAKER_BPS", "3.5")),
+            aster_taker_bps=float(os.getenv("FEE_ASTER_TAKER_BPS", "4.0")),
             max_breakeven_hours=float(os.getenv("EXEC_MAX_BREAKEVEN_HOURS", "8")),
             expected_hold_hours=float(os.getenv("EXEC_EXPECTED_HOLD_HOURS", "8")),
             basis_window_hours=float(os.getenv("EXEC_BASIS_WINDOW_HOURS", "6")),
@@ -167,6 +177,11 @@ class Settings:
             passive_max_wait_s=float(os.getenv("EXEC_PASSIVE_MAX_WAIT_S", "90")),
             hedge_max_wait_s=float(os.getenv("EXEC_HEDGE_MAX_WAIT_S", "15")),
             cross_cap_bps=float(os.getenv("EXEC_CROSS_CAP_BPS", "20")),
+            max_cross_half_spread_bps=float(os.getenv("EXEC_MAX_CROSS_HALF_SPREAD_BPS", "3")),
+            anchor_max_wait_s=float(os.getenv("EXEC_ANCHOR_MAX_WAIT_S", "2400")),
+            anchor_start_offset_bps=float(os.getenv("EXEC_ANCHOR_START_OFFSET_BPS", "8")),
+            anchor_steps=int(os.getenv("EXEC_ANCHOR_STEPS", "4")),
+            repost_min_interval_s=float(os.getenv("EXEC_REPOST_MIN_INTERVAL_S", "10")),
             poll_interval_s=float(os.getenv("EXEC_POLL_INTERVAL_S", "3")),
             sample_interval_s=float(os.getenv("EXEC_SAMPLE_INTERVAL_S", "30")),
         )

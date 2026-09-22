@@ -94,7 +94,7 @@ Entries and exits are not blind limit orders any more. Four deterministic signal
 | **Order-book imbalance** | `execution.execute_pair` → `microstructure.plan_leg` | Top-5 `(bid−ask)/(bid+ask)`. If the book is pushing against a passive order (e.g. buying while imbalance ≥ +0.3), cross immediately instead of resting. |
 | **Queue position** | same | Quantity resting at the touch ÷ aggressive flow rate from recent trades = expected wait. Longer than `EXEC_PASSIVE_MAX_WAIT_S` → cross. Otherwise post-only at the touch, and cross the remainder when the deadline passes. |
 
-Leg risk: once one leg has filled, the other leg's deadline collapses to `EXEC_HEDGE_MAX_WAIT_S` and it is crossed (IOC limit, slippage capped at `EXEC_CROSS_CAP_BPS`). The old behaviour (unwind the filled leg after 30 s) is gone; it only survives as the last-resort fallback.
+**Sequencing (passive on the wide book, cross the tight one).** The leg on the venue with the wider half-spread is the *anchor*: it rests post-only at the touch (re-posted when the touch moves away) for up to `EXEC_ANCHOR_MAX_WAIT_S`. Each time the anchor fills, the other leg (*hedge*) is crossed on the tighter book with an IOC limit (slippage capped at `EXEC_CROSS_CAP_BPS`), so the naked exposure lasts seconds and the taker cost is about half a tight spread plus the taker fee. A book whose half-spread exceeds `EXEC_MAX_CROSS_HALF_SPREAD_BPS` is never crossed (except to hedge); on a wide book the taker pays the spread, which dwarfs any timing edge. The anchor does not start at the touch: it **ladders in** from `EXEC_ANCHOR_START_OFFSET_BPS` beyond the touch (a better price for us) down to the touch in `EXEC_ANCHOR_STEPS` equal time slices over the time left in the trading window, so a favourable wobble in price is captured as extra edge while the last slice still gives a plain at-the-touch fill a chance. If the anchor never fills, the entry is abandoned without paying anything. Post-only orders (`Alo` on Hyperliquid, `GTX` on Aster) are rejected rather than filled as taker, so a maker leg can never pay taker fees by accident; the log records `est_fee_bps` and `maker_fraction` per leg.
 
 Decision log kinds: `scan`, `gate`, `leg_plan`, `leg_order`, `leg_fill` (planned vs final tactic, wait, slippage vs mid at decision), `pair_result`, `basis_exit`. The dashboard's *Execution & signals* panel aggregates fill rate and average slippage per planned tactic, gate outcomes and basis exits.
 
@@ -103,7 +103,7 @@ Decision log kinds: `scan`, `gate`, `leg_plan`, `leg_order`, `leg_fill` (planned
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FEE_HL_MAKER_BPS` / `FEE_HL_TAKER_BPS` | `1.5` / `4.5` | Hyperliquid fees per fill (bps) |
-| `FEE_ASTER_MAKER_BPS` / `FEE_ASTER_TAKER_BPS` | `1.0` / `3.5` | Aster fees per fill (bps) |
+| `FEE_ASTER_MAKER_BPS` / `FEE_ASTER_TAKER_BPS` | `1.0` / `4.0` | Aster fees per fill (bps, taker observed live) |
 | `EXEC_MAX_BREAKEVEN_HOURS` | `8` | Skip entries that need longer to repay costs |
 | `EXEC_EXPECTED_HOLD_HOURS` | `8` | Horizon used to value a switch |
 | `EXEC_BASIS_WINDOW_HOURS` / `EXEC_BASIS_MIN_SAMPLES` | `6` / `60` | Rolling window for basis mean/std |
@@ -111,6 +111,10 @@ Decision log kinds: `scan`, `gate`, `leg_plan`, `leg_order`, `leg_fill` (planned
 | `EXEC_IMBALANCE_THRESHOLD` | `0.3` | Cross when the book pushes against the passive side |
 | `EXEC_PASSIVE_MAX_WAIT_S` / `EXEC_HEDGE_MAX_WAIT_S` | `90` / `15` | Passive patience, and patience once naked |
 | `EXEC_CROSS_CAP_BPS` | `20` | Slippage cap on crossing IOC orders |
+| `EXEC_MAX_CROSS_HALF_SPREAD_BPS` | `3` | Never cross a book wider than this (except to hedge) |
+| `EXEC_ANCHOR_MAX_WAIT_S` | `2400` | Patience for the passive anchor leg (also capped by the time left in the trading window) |
+| `EXEC_ANCHOR_START_OFFSET_BPS` / `EXEC_ANCHOR_STEPS` | `8` / `4` | Ladder: anchor starts this far beyond the touch and tightens to the touch in equal time steps; the last step rests at the touch |
+| `EXEC_REPOST_MIN_INTERVAL_S` | `10` | Minimum time between anchor re-posts when the touch or the ladder moves |
 | `EXEC_SAMPLE_INTERVAL_S` | `30` | Basis sampler cadence |
 
 ---

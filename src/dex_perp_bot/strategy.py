@@ -527,7 +527,8 @@ def perform_hourly_rebalance(
 
     # 6. Execute the trade.
     execute_strategy(aster_client, hyperliquid_client, decision, notifier=notifier, exec_cfg=exec_cfg,
-                     entry_basis_bps=gate_info["basis_now_bps"] if gate_info else None)
+                     entry_basis_bps=gate_info["basis_now_bps"] if gate_info else None,
+                     time_budget_s=cleanup_timeout_seconds)
 
 
 def execute_strategy(
@@ -537,6 +538,7 @@ def execute_strategy(
     notifier: Optional["DiscordNotifier"] = None,
     exec_cfg: Optional[ExecutionConfig] = None,
     entry_basis_bps: Optional[Decimal] = None,
+    time_budget_s: float = 300.0,
 ) -> None:
     """
     Executes a pre-determined strategy: sets leverage, then runs both legs through
@@ -559,8 +561,11 @@ def execute_strategy(
         Leg(long_venue_client, decision.long_symbol, "buy", decision.long_qty),
         Leg(short_venue_client, decision.short_symbol, "sell", decision.short_qty),
     ]
-    result = execute_pair(legs, exec_cfg, context=f"entry:{decision.opportunity.symbol}")
+    result = execute_pair(legs, exec_cfg, context=f"entry:{decision.opportunity.symbol}", max_total_s=float(time_budget_s))
     logger.info("Execution result: %s", result.summary())
+    if all(leg.filled == 0 for leg in legs):
+        logger.warning("Nothing filled (anchor never traded); no position, no fees. Waiting for the next window.")
+        return
 
     for leg, side, venue in ((legs[0], "BUY", decision.opportunity.long_venue), (legs[1], "SELL", decision.opportunity.short_venue)):
         if leg.filled > 0:
