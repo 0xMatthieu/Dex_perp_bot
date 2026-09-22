@@ -76,7 +76,8 @@ class ExecutionConfig:
     max_cross_half_spread_bps: float  # never cross a book whose half-spread is wider than this (except to hedge)
     anchor_max_wait_s: float        # patience for the passive leg on the wide book before giving up the entry
     anchor_start_offset_bps: float  # anchor starts this far beyond the touch (better price for us) ...
-    anchor_steps: int               # ... and tightens to the touch in this many equal time steps
+    anchor_steps: int               # ... and tightens in this many equal time steps ...
+    anchor_min_edge_bps: float      # ... down to this distance from mid (inside the spread on wide books)
     repost_min_interval_s: float    # do not chase the touch more often than this
     max_tick_bps: float             # skip symbols whose price tick is coarser than this on either venue
     exit_max_wait_s: float          # patience for the passive leg when closing (exits are time-sensitive)
@@ -166,7 +167,7 @@ class Settings:
         execution_config = ExecutionConfig(
             hl_maker_bps=float(os.getenv("FEE_HL_MAKER_BPS", "1.5")),
             hl_taker_bps=float(os.getenv("FEE_HL_TAKER_BPS", "4.5")),
-            aster_maker_bps=float(os.getenv("FEE_ASTER_MAKER_BPS", "1.0")),
+            aster_maker_bps=float(os.getenv("FEE_ASTER_MAKER_BPS", "0.0")),  # observed: maker fills charged 0
             aster_taker_bps=float(os.getenv("FEE_ASTER_TAKER_BPS", "4.0")),
             max_breakeven_hours=float(os.getenv("EXEC_MAX_BREAKEVEN_HOURS", "8")),
             expected_hold_hours=float(os.getenv("EXEC_EXPECTED_HOLD_HOURS", "8")),
@@ -183,6 +184,7 @@ class Settings:
             anchor_max_wait_s=float(os.getenv("EXEC_ANCHOR_MAX_WAIT_S", "2400")),
             anchor_start_offset_bps=float(os.getenv("EXEC_ANCHOR_START_OFFSET_BPS", "8")),
             anchor_steps=int(os.getenv("EXEC_ANCHOR_STEPS", "4")),
+            anchor_min_edge_bps=float(os.getenv("EXEC_ANCHOR_MIN_EDGE_BPS", "3")),
             repost_min_interval_s=float(os.getenv("EXEC_REPOST_MIN_INTERVAL_S", "10")),
             max_tick_bps=float(os.getenv("EXEC_MAX_TICK_BPS", "10")),
             exit_max_wait_s=float(os.getenv("EXEC_EXIT_MAX_WAIT_S", "120")),

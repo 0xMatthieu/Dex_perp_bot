@@ -15,7 +15,7 @@ def cfg(**over):
                 z_enter=1.0, z_exit=1.5, basis_exit_min_gain_bps=5, imbalance_threshold=0.3,
                 passive_max_wait_s=0.2, hedge_max_wait_s=0.05, cross_cap_bps=20, max_cross_half_spread_bps=3,
                 anchor_max_wait_s=0.3, anchor_start_offset_bps=0, anchor_steps=4, repost_min_interval_s=0,
-                max_tick_bps=10, exit_max_wait_s=0.3, poll_interval_s=0.01, sample_interval_s=30)
+                max_tick_bps=10, exit_max_wait_s=0.3, anchor_min_edge_bps=3, poll_interval_s=0.01, sample_interval_s=30)
     base.update(over)
     return ExecutionConfig(**base)
 
@@ -68,7 +68,8 @@ class FakeVenue:
     def get_order_state(self, symbol, order_id):
         o = self.orders[order_id]
         o["polls"] += 1
-        at_touch = o["price"] == (self.bid if o["side"] == "buy" else self.ask)
+        # "at touch" = at or inside the spread (a resting order that is the best quote gets hit first)
+        at_touch = (o["price"] >= self.bid) if o["side"] == "buy" else (o["price"] <= self.ask)
         if (o["status"] == "open" and o["post_only"] and self.passive_fills_after is not None
                 and o["polls"] >= self.passive_fills_after and (at_touch or not self.fill_only_at_touch)):
             if self.partial and o["filled"] == 0 and o["qty"] > self.partial:
@@ -104,7 +105,7 @@ def wide_and_tight(wide_fills=2, tight_fills=None):
 def test_anchor_is_wide_book_and_hedge_crosses_tight():
     aster, hl = wide_and_tight()
     legs = [Leg(hl, "CASHCAT/USDC:USDC", "buy", D("3000")), Leg(aster, "CASHCATUSDT", "sell", D("3000"))]
-    r = execute_pair(legs, cfg(), max_total_s=5)
+    r = execute_pair(legs, cfg(anchor_max_wait_s=5), max_total_s=10)  # long horizon: first ladder step after the fill
     assert r.hedged
     a = next(l for l in legs if l.venue_name == "Aster"); h = next(l for l in legs if l.venue_name == "Hyperliquid")
     assert a.role == "anchor" and a.current_tactic == "passive" and a.avg_price == D("0.16783")  # sold at the ask
@@ -199,19 +200,23 @@ def test_post_only_rejection_gives_up_after_retries():
     assert legs[1].error and legs[1].error.startswith("submit:")
 
 
-def test_anchor_ladders_from_deep_to_touch():
+def test_anchor_ladders_from_beyond_touch_to_inside_spread():
     from src.dex_perp_bot.execution import ladder_offset_bps
     c = cfg(anchor_start_offset_bps=8, anchor_steps=4, anchor_max_wait_s=100)
-    assert [round(float(ladder_offset_bps(c, t, 100)), 2) for t in (0, 24, 25, 50, 75, 99, 100)] == [8, 8, 5.33, 2.67, 0, 0, 0]
-    # Live: sell anchor starts 8 bps above the ask, fills only once the ladder reaches the touch.
+    # wide book: half-spread 8.65 bps -> start 16.65 from mid, end 3 from mid (inside the spread)
+    got = [round(float(ladder_offset_bps(c, t, 100, D("8.65"))), 2) for t in (0, 24, 25, 50, 75, 99)]
+    assert got == [16.65, 16.65, 12.1, 7.55, 3, 3]
+    # tight book: half-spread 0.6 -> start 8.6, end 3 (still beyond the touch, post-only keeps it maker)
+    assert round(float(ladder_offset_bps(c, 99, 100, D("0.6"))), 2) == 3
+    # Live: sell anchor starts 8 bps above the ask, fills once it steps inside the spread.
     aster = FakeVenue("Aster", "0.16754", "0.16783", passive_fills_after=1, fill_only_at_touch=True)
     hl = FakeVenue("Hyperliquid", "0.16761", "0.16763")
     legs = [Leg(hl, "X", "buy", D("3000")), Leg(aster, "Y", "sell", D("3000"))]
     r = execute_pair(legs, cfg(anchor_start_offset_bps=8, anchor_steps=2, anchor_max_wait_s=0.4), max_total_s=60)
     a = legs[1]
     assert r.hedged and a.current_tactic == "passive"
-    assert aster.placed[0][2] == D("0.16797")  # 0.16783 * 1.0008 rounded up to the tick
-    assert aster.placed[-1][2] == D("0.16783") and a.avg_price == D("0.16783")
+    assert aster.placed[0][2] == D("0.16797")  # mid 0.167685 * (1 + 16.65 bps) rounded up
+    assert aster.placed[-1][2] == D("0.16774") and a.avg_price == D("0.16774")  # mid + 3 bps, inside the spread
     assert a.reposts >= 1
 
 
@@ -231,7 +236,7 @@ def test_coarse_tick_rests_at_touch_not_a_full_tick_away():
     assert passive_price("buy", bids, asks, D("8"), D("0.000001")) == D("0.000178")
     # fine tick: offset applies
     bids, asks = [(D("0.16754"), D("1"))], [(D("0.16783"), D("1"))]
-    assert passive_price("sell", bids, asks, D("8"), D("0.00001")) == D("0.16797")
+    assert passive_price("sell", bids, asks, D("8"), D("0.00001")) == D("0.16782")  # mid + 8 bps, inside the spread
 
 
 def test_abort_cancels_anchor_and_hedges_partial():
@@ -256,3 +261,17 @@ def test_exit_mode_no_ladder():
     legs = [Leg(hl, "X", "sell", D("3000"), reduce_only=True), Leg(aster, "Y", "buy", D("3000"), reduce_only=True)]
     r = execute_pair(legs, cfg(anchor_start_offset_bps=8, anchor_steps=4), max_total_s=5, ladder=False, anchor_wait_s=0.3)
     assert r.hedged and aster.placed[0][2] == D("0.16754")  # at the bid, no offset
+
+
+def test_passive_price_inside_spread_never_crosses():
+    from src.dex_perp_bot.execution import passive_price
+    bids, asks = [(D("0.16754"), D("1"))], [(D("0.16783"), D("1"))]
+    # 3 bps from mid, inside the spread, still above the bid
+    assert passive_price("sell", bids, asks, D("3"), D("0.00001")) == D("0.16774")
+    assert passive_price("buy", bids, asks, D("3"), D("0.00001")) == D("0.16763")
+    # an offset smaller than a tick can never end up at or through the other side
+    assert passive_price("sell", bids, asks, D("0"), D("0.00001")) >= D("0.16755")
+    assert passive_price("buy", bids, asks, D("0"), D("0.00001")) <= D("0.16782")
+    # at the half-spread = the touch
+    hs = D("8.647")
+    assert passive_price("sell", bids, asks, hs, D("0.00001")) == D("0.16783")

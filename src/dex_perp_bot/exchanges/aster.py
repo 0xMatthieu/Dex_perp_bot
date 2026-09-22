@@ -250,6 +250,10 @@ class AsterClient:
                 return 50
             return int(max_leverage)
         except DexAPIError as exc:
+            msg = str(exc)
+            if "-4141" in msg or "-4108" in msg or "closed" in msg.lower() or "settling" in msg.lower():
+                # Delisting / settlement: the funding rate is a dead number, the market cannot be traded.
+                raise DexAPIError(f"{symbol} is closed or settling on Aster: {exc}") from exc
             logger.warning("Failed to fetch leverage brackets for %s from Aster, falling back to 50x. Error: %s", symbol, exc)
             return 50  # Fallback
 

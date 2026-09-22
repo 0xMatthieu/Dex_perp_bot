@@ -103,7 +103,7 @@ Decision log kinds: `scan`, `gate`, `leg_plan`, `leg_order`, `leg_fill` (planned
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FEE_HL_MAKER_BPS` / `FEE_HL_TAKER_BPS` | `1.5` / `4.5` | Hyperliquid fees per fill (bps) |
-| `FEE_ASTER_MAKER_BPS` / `FEE_ASTER_TAKER_BPS` | `1.0` / `4.0` | Aster fees per fill (bps, taker observed live) |
+| `FEE_ASTER_MAKER_BPS` / `FEE_ASTER_TAKER_BPS` | `0.0` / `4.0` | Aster fees per fill (bps, both observed live: maker fills were charged 0) |
 | `EXEC_MAX_BREAKEVEN_HOURS` | `8` | Skip entries that need longer to repay costs |
 | `EXEC_EXPECTED_HOLD_HOURS` | `8` | Horizon used to value a switch |
 | `EXEC_BASIS_WINDOW_HOURS` / `EXEC_BASIS_MIN_SAMPLES` | `6` / `60` | Rolling window for basis mean/std |
@@ -113,7 +113,7 @@ Decision log kinds: `scan`, `gate`, `leg_plan`, `leg_order`, `leg_fill` (planned
 | `EXEC_CROSS_CAP_BPS` | `20` | Slippage cap on crossing IOC orders |
 | `EXEC_MAX_CROSS_HALF_SPREAD_BPS` | `3` | Never cross a book wider than this (except to hedge) |
 | `EXEC_ANCHOR_MAX_WAIT_S` | `2400` | Patience for the passive anchor leg (also capped by the time left in the trading window) |
-| `EXEC_ANCHOR_START_OFFSET_BPS` / `EXEC_ANCHOR_STEPS` | `8` / `4` | Ladder: anchor starts this far beyond the touch and tightens to the touch in equal time steps; the last step rests at the touch |
+| `EXEC_ANCHOR_START_OFFSET_BPS` / `EXEC_ANCHOR_STEPS` / `EXEC_ANCHOR_MIN_EDGE_BPS` | `8` / `4` / `3` | Ladder: anchor starts this far beyond the touch and tightens in equal time steps down to `MIN_EDGE` bps from mid (inside the spread on wide books) |
 | `EXEC_REPOST_MIN_INTERVAL_S` | `10` | Minimum time between anchor re-posts when the touch or the ladder moves |
 | `EXEC_SAMPLE_INTERVAL_S` | `30` | Basis sampler cadence |
 

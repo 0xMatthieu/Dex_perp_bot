@@ -25,7 +25,7 @@ from src.dex_perp_bot.strategy import perform_hourly_rebalance, report_portfolio
 from src.dex_perp_bot.status import write_status
 from src.dex_perp_bot.control import CONTROL_POLL_SECONDS, read_control, write_control
 from src.dex_perp_bot.strategy import cleanup_all_open_positions_and_orders
-from src.dex_perp_bot.strategy import check_basis_exit, load_position_state, aster_symbol, hl_symbol, cancel_all_open_orders
+from src.dex_perp_bot.strategy import check_basis_exit, load_position_state, aster_symbol, hl_symbol, cancel_all_open_orders, reconcile_position_state
 from src.dex_perp_bot.basis import BasisTracker
 from src.dex_perp_bot import funding
 from src.dex_perp_bot.funding import fetch_and_compare_funding_rates
@@ -108,8 +108,9 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _on_sigterm)
     try:
         cancel_all_open_orders(aster_client, hyperliquid_client, reason="startup: orphans from a previous run")
+        reconcile_position_state(aster_client, hyperliquid_client)
     except Exception as exc:
-        logger.warning("Startup order cleanup failed: %s", exc)
+        logger.warning("Startup order cleanup / reconcile failed: %s", exc)
 
     try:
         logger.info("Synchronizing time with Aster API...")

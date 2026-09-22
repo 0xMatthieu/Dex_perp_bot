@@ -133,25 +133,37 @@ def _round_qty(qty: Decimal, step: Decimal) -> Decimal:
     return (qty // step) * step
 
 
-def passive_price(side: str, bids: List, asks: List, offset_bps: Decimal, tick: Decimal) -> Decimal:
-    """Touch improved by ``offset_bps`` in our favour: BUY below the bid, SELL above the ask. Never crosses.
+def passive_price(side: str, bids: List, asks: List, offset_from_mid_bps: Decimal, tick: Decimal) -> Decimal:
+    """Resting price ``offset_from_mid_bps`` away from mid in our favour: SELL above mid, BUY below.
 
-    When one tick is coarser than the requested offset (low-priced coins), the offset would round to a
-    whole tick, i.e. far more than asked, so we rest at the touch instead.
+    Inside the spread (offset < half-spread) the order becomes the best quote and gets price priority
+    while staying maker. Beyond the touch it queues behind the book. Rounded away from mid to the tick;
+    never crosses the opposite side. When one tick is coarser than the part beyond the touch, rest at the
+    touch instead of a whole tick further out.
     """
-    touch = bids[0][0] if side == "buy" else asks[0][0]
-    if offset_bps <= 0 or touch <= 0:
-        return round_to_tick(touch, tick, side)
-    tick_bps = tick / touch * Decimal(10_000)
-    if tick_bps >= offset_bps:
-        return round_to_tick(touch, tick, side)
-    raw = touch * (1 - offset_bps / Decimal(10_000)) if side == "buy" else touch * (1 + offset_bps / Decimal(10_000))
-    return round_to_tick(raw, tick, side)
+    bid, ask = bids[0][0], asks[0][0]
+    mid = (bid + ask) / 2
+    if mid <= 0:
+        return round_to_tick(ask if side == "sell" else bid, tick, side)
+    hs = half_spread_bps(bids, asks)
+    tick_bps = tick / mid * Decimal(10_000)
+    beyond = offset_from_mid_bps - hs
+    if beyond > 0 and tick_bps >= beyond:
+        return round_to_tick(ask if side == "sell" else bid, tick, side)
+    q = Decimal("1e-12")  # kill Decimal noise before rounding to the tick (mid + half-spread must equal the ask)
+    if side == "sell":
+        raw = (mid * (1 + offset_from_mid_bps / Decimal(10_000))).quantize(q)
+        price = round_to_tick(raw, tick, "sell")
+        return max(price, round_to_tick(bid + tick, tick, "sell"))  # never at/through the bid
+    raw = (mid * (1 - offset_from_mid_bps / Decimal(10_000))).quantize(q)
+    price = round_to_tick(raw, tick, "buy")
+    return min(price, round_to_tick(ask - tick, tick, "buy"))  # never at/through the ask
 
 
 def _submit(leg: Leg, tactic: str, cfg: ExecutionConfig, context: str, qty: Optional[Decimal] = None,
-            offset_bps: Decimal = Decimal(0)) -> None:
-    """Place (or re-place) ``qty`` (default: the remaining quantity) of a leg with the given tactic."""
+            offset_bps: Optional[Decimal] = None) -> None:
+    """Place (or re-place) ``qty`` (default: the remaining quantity) of a leg with the given tactic.
+    ``offset_bps`` is the passive distance from mid (None = the touch)."""
     book = leg.venue.get_book(leg.symbol, depth=5)
     bids, asks = book["bids"], book["asks"]
     if not bids or not asks:
@@ -162,7 +174,7 @@ def _submit(leg: Leg, tactic: str, cfg: ExecutionConfig, context: str, qty: Opti
     if tactic == "passive":
         attempt = 0
         while True:
-            price = passive_price(leg.side, bids, asks, offset_bps, leg.tick)
+            price = passive_price(leg.side, bids, asks, offset_bps if offset_bps is not None else half_spread_bps(bids, asks), leg.tick)
             try:
                 order_id = leg.venue.place_limit(leg.symbol, leg.side, qty, price, post_only=True, reduce_only=leg.reduce_only)
                 break
@@ -289,15 +301,18 @@ def _hedge_slice(anchor: Leg, hedge: Leg, cfg: ExecutionConfig, context: str) ->
         logger.warning("[%s] hedge refresh failed: %s", hedge.venue_name, exc)
 
 
-def ladder_offset_bps(cfg: ExecutionConfig, elapsed_s: float, horizon_s: float) -> Decimal:
-    """Offset beyond the touch as a function of time: start at ``anchor_start_offset_bps`` and step down
-    linearly to 0 (the touch) over ``anchor_steps`` equal slices of ``horizon_s``."""
+def ladder_offset_bps(cfg: ExecutionConfig, elapsed_s: float, horizon_s: float, half_spread_bps_now: Decimal) -> Decimal:
+    """Distance from mid for the anchor as a function of time: start ``anchor_start_offset_bps`` beyond
+    the touch, tighten linearly over ``anchor_steps`` slices of ``horizon_s`` down to ``anchor_min_edge_bps``
+    from mid (inside the spread on a wide book, at the touch on a tight one)."""
     steps = max(1, cfg.anchor_steps)
-    if horizon_s <= 0 or cfg.anchor_start_offset_bps <= 0 or steps == 1:
-        return Decimal(0)
+    start = half_spread_bps_now + Decimal(str(cfg.anchor_start_offset_bps))
+    end = min(start, Decimal(str(cfg.anchor_min_edge_bps)))
+    if horizon_s <= 0 or steps == 1:
+        return end
     k = min(steps - 1, int(elapsed_s / (horizon_s / steps)))
-    # k = 0 -> full offset, k = steps-1 (last slice) -> at the touch
-    return Decimal(str(cfg.anchor_start_offset_bps)) * Decimal(steps - 1 - k) / Decimal(steps - 1)
+    f = Decimal(k) / Decimal(steps - 1)
+    return start * (1 - f) + end * f
 
 
 def execute_pair(
@@ -348,9 +363,10 @@ def execute_pair(
     horizon = min(anchor_wait_s if anchor_wait_s is not None else cfg.anchor_max_wait_s, max(max_total_s - 30.0, 30.0))
     ladder_start = time.time()
     last_repost = 0.0
-    offset_now = (lambda elapsed: ladder_offset_bps(cfg, elapsed, horizon)) if ladder else (lambda elapsed: Decimal(0))
+    def offset_now(elapsed: float, hs: Decimal) -> Optional[Decimal]:
+        return ladder_offset_bps(cfg, elapsed, horizon, hs) if ladder else None  # None = the touch
     try:
-        _submit(anchor, tactic, cfg, context, offset_bps=offset_now(0.0) if tactic == "passive" else Decimal(0))
+        _submit(anchor, tactic, cfg, context, offset_bps=offset_now(0.0, anchor.half_spread_bps) if tactic == "passive" else None)
         anchor.deadline = time.time() + (horizon if tactic == "passive" else max(cfg.poll_interval_s * 2, 5.0))
     except Exception as exc:
         anchor.error = f"submit: {exc}"
@@ -405,8 +421,9 @@ def execute_pair(
             # (the touch moved, or the ladder stepped closer to the touch).
             try:
                 book = anchor.venue.get_book(anchor.symbol, depth=1)
-                offset = offset_now(now - ladder_start)
-                target = passive_price(anchor.side, book["bids"], book["asks"], offset, anchor.tick)
+                hs_now = half_spread_bps(book["bids"], book["asks"])
+                offset = offset_now(now - ladder_start, hs_now)
+                target = passive_price(anchor.side, book["bids"], book["asks"], offset if offset is not None else hs_now, anchor.tick)
                 if anchor.order_price is not None and abs(target - anchor.order_price) >= anchor.tick and anchor.reposts < MAX_REPOSTS:
                     _cancel(anchor)
                     if not anchor.done:

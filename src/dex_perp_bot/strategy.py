@@ -83,6 +83,47 @@ def market_snapshot(aster_client: AsterClient, hyperliquid_client: HyperliquidCl
     }
 
 
+def reconcile_position_state(aster_client: AsterClient, hyperliquid_client: HyperliquidClient) -> Optional[Dict]:
+    """Rebuild logs/position_state.json from live positions when it is missing or stale (e.g. the
+    process was stopped mid-execution). Entry basis is adopted from the current market."""
+    try:
+        hl_positions = hyperliquid_client.get_all_positions()
+        aster_positions = aster_client.get_all_positions()
+    except Exception as exc:
+        logger.warning("reconcile: cannot read positions: %s", exc)
+        return load_position_state()
+    state = load_position_state()
+    if not hl_positions and not aster_positions:
+        if state:
+            logger.info("reconcile: no positions but a state file exists; clearing it")
+            save_position_state(None)
+        return None
+    if len(hl_positions) != 1 or len(aster_positions) != 1:
+        logger.warning("reconcile: unexpected position set (HL %d, Aster %d); leaving state as is",
+                       len(hl_positions), len(aster_positions))
+        return state
+    hl_pos, a_pos = hl_positions[0], aster_positions[0]
+    symbol = str(hl_pos.get("symbol", "")).split("/")[0]
+    long_venue = "Hyperliquid" if hl_pos.get("side") == "long" else "Aster"
+    if state and state.get("symbol") == symbol and state.get("long_venue") == long_venue:
+        return state
+    try:
+        entry_basis = float(current_basis(aster_client, hyperliquid_client, symbol))
+    except Exception:
+        entry_basis = None
+    state = {
+        "symbol": symbol, "long_venue": long_venue,
+        "short_venue": "Aster" if long_venue == "Hyperliquid" else "Hyperliquid",
+        "entry_basis_bps": entry_basis, "entry_basis_note": "adopted at reconcile (state file was missing)",
+        "net_apy_pct": None, "entered_at": datetime.now(timezone.utc).isoformat(),
+        "legs": [{"venue": "Hyperliquid", "side": hl_pos.get("side"), "filled": str(hl_pos.get("contracts")), "avg_price": str(hl_pos.get("entryPrice"))},
+                 {"venue": "Aster", "filled": str(a_pos.get("positionAmt")), "avg_price": str(a_pos.get("entryPrice"))}],
+    }
+    save_position_state(state)
+    log_event("note", message="position state reconciled from live positions", **{k: v for k, v in state.items() if k != "legs"})
+    return state
+
+
 def current_basis(aster_client: AsterClient, hyperliquid_client: HyperliquidClient, base: str) -> Decimal:
     """Aster premium over HL in bps from both mid prices."""
     return market_snapshot(aster_client, hyperliquid_client, base)["basis_bps"]
@@ -132,6 +173,11 @@ def evaluate_entry_gate(
     """
     stats = tracker.stats(opp.symbol, basis_now_bps, exec_cfg.basis_window_hours, exec_cfg.basis_min_samples)
     reversion = expected_reversion_bps(stats, opp.long_venue)
+    if stats.z is None:
+        # No history yet: assume the cross-venue basis reverts to 0 (same index on both venues).
+        # Long HL / short Aster profits when Aster-minus-HL falls, so a negative basis now is adverse.
+        from .microstructure import favorable_sign
+        reversion = Decimal(favorable_sign(opp.long_venue)) * (Decimal(0) - basis_now_bps)
     fz = favorable_z(stats, opp.long_venue)
     fee_cost = Decimal(str(exec_cfg.round_trip_cost_bps))
     crossing = 2 * hedge_cross_bps(snapshot) if snapshot else Decimal(0)
@@ -158,7 +204,8 @@ def evaluate_entry_gate(
         "half_spread_hl_bps": snapshot["half_spread_hl_bps"] if snapshot else None,
         "basis_now_bps": basis_now_bps, "basis_mean_bps": stats.mean_bps,
         "basis_std_bps": stats.std_bps, "basis_samples": stats.n, "z": stats.z, "favorable_z": fz,
-        "expected_reversion_bps": reversion, "effective_cost_bps": effective_cost,
+        "expected_reversion_bps": reversion, "reversion_prior": "history" if stats.z is not None else "mean0",
+        "effective_cost_bps": effective_cost,
         "breakeven_hours": hours, "max_breakeven_hours": exec_cfg.max_breakeven_hours,
         "ok": ok, "reason_code": reason_code,
     }
@@ -507,6 +554,8 @@ def perform_hourly_rebalance(
             basis_now = snap["basis_bps"]
         except Exception as exc:
             logger.warning("Could not read books for %s: %s", opp.symbol, exc)
+            log_event("gate", decision="skip", reason_code="books_unavailable", symbol=opp.symbol,
+                      long_venue=opp.long_venue, net_apy_pct=opp.apy_difference, error=str(exc)[:200])
             continue
         basis_tracker.record_bps(opp.symbol, basis_now)  # keep history warm
         info = evaluate_entry_gate(opp, exec_cfg, basis_tracker, basis_now, snap)
@@ -632,6 +681,16 @@ def execute_strategy(
     if all(leg.filled == 0 for leg in legs):
         logger.warning("Nothing filled (anchor never traded); no position, no fees. Waiting for the next window.")
         return
+    if any(leg.filled > 0 for leg in legs):
+        # Persist immediately: if the process dies during verification the basis exit still knows the entry.
+        save_position_state({
+            "symbol": decision.opportunity.symbol, "long_venue": decision.opportunity.long_venue,
+            "short_venue": decision.opportunity.short_venue,
+            "entry_basis_bps": float(entry_basis_bps) if entry_basis_bps is not None else None,
+            "net_apy_pct": float(decision.opportunity.apy_difference),
+            "entered_at": datetime.now(timezone.utc).isoformat(), "verified": False,
+            "legs": result.summary()["legs"],
+        })
 
     for leg, side, venue in ((legs[0], "BUY", decision.opportunity.long_venue), (legs[1], "SELL", decision.opportunity.short_venue)):
         if leg.filled > 0:
