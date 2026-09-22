@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from pathlib import Path
 
+import json
+
+from .basis import BasisTracker
+from .config import ExecutionConfig
+from .decision_log import log_event
+from .execution import Leg, execute_pair
 from .funding import FundingComparison, fetch_and_compare_funding_rates
 from .exchanges.aster import AsterClient
 from .exchanges.hyperliquid import HyperliquidClient
+from .microstructure import (
+    basis_bps, basis_gain_bps, breakeven_hours, expected_reversion_bps, favorable_z, funding_bps_per_hour,
+)
 from .trade_log import log_trade
 
 if TYPE_CHECKING:
@@ -19,6 +29,92 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TRADE_LOG_PATH = Path("logs/trades.md")
+POSITION_STATE_PATH = Path("logs/position_state.json")
+
+
+def hl_symbol(base: str) -> str:
+    return f"{base}/USDC:USDC"
+
+
+def aster_symbol(base: str) -> str:
+    return f"{base}USDT"
+
+
+# ---------------------------------------------------------------------------
+# Position state (what we hold and the basis at entry) - survives restarts
+# ---------------------------------------------------------------------------
+
+def load_position_state(path: Path = POSITION_STATE_PATH) -> Optional[Dict]:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def save_position_state(state: Optional[Dict], path: Path = POSITION_STATE_PATH) -> None:
+    try:
+        if state is None:
+            if path.exists():
+                path.unlink()
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not write position state: %s", exc)
+
+
+def current_basis(aster_client: AsterClient, hyperliquid_client: HyperliquidClient, base: str) -> Decimal:
+    """Aster premium over HL in bps from both mid prices."""
+    a = aster_client.get_book(aster_symbol(base), depth=1)
+    h = hyperliquid_client.get_book(hl_symbol(base), depth=1)
+    mid_a = (a["bids"][0][0] + a["asks"][0][0]) / 2
+    mid_h = (h["bids"][0][0] + h["asks"][0][0]) / 2
+    return basis_bps(mid_a, mid_h)
+
+
+# ---------------------------------------------------------------------------
+# Gates: fee break-even (with basis reversion) and switch economics
+# ---------------------------------------------------------------------------
+
+def evaluate_entry_gate(
+    opp: FundingComparison,
+    exec_cfg: ExecutionConfig,
+    tracker: BasisTracker,
+    basis_now_bps: Decimal,
+) -> Dict:
+    """Return a dict with ``ok`` plus every input, and log it as a ``gate`` event."""
+    stats = tracker.stats(opp.symbol, basis_now_bps, exec_cfg.basis_window_hours, exec_cfg.basis_min_samples)
+    reversion = expected_reversion_bps(stats, opp.long_venue)
+    fz = favorable_z(stats, opp.long_venue)
+    fee_cost = Decimal(str(exec_cfg.round_trip_cost_bps))
+    effective_cost = fee_cost - reversion
+    hours = breakeven_hours(effective_cost, opp.apy_difference)
+    ok = hours <= exec_cfg.max_breakeven_hours
+    reason_code = "ok" if ok else ("adverse_basis" if reversion < 0 and breakeven_hours(fee_cost, opp.apy_difference) <= exec_cfg.max_breakeven_hours else "breakeven_too_long")
+    info = {
+        "symbol": opp.symbol, "long_venue": opp.long_venue, "net_apy_pct": opp.apy_difference,
+        "funding_bps_per_hour": funding_bps_per_hour(opp.apy_difference),
+        "fee_cost_bps": fee_cost, "basis_now_bps": basis_now_bps, "basis_mean_bps": stats.mean_bps,
+        "basis_std_bps": stats.std_bps, "basis_samples": stats.n, "z": stats.z, "favorable_z": fz,
+        "expected_reversion_bps": reversion, "effective_cost_bps": effective_cost,
+        "breakeven_hours": hours, "max_breakeven_hours": exec_cfg.max_breakeven_hours,
+        "ok": ok, "reason_code": reason_code,
+    }
+    log_event("gate", decision="enter" if ok else "skip", **info)
+    return info
+
+
+def evaluate_switch_gate(current_apy: Decimal, new_apy: Decimal, exec_cfg: ExecutionConfig, symbol: str) -> bool:
+    """Switching pays a full round trip; the APY improvement must repay it within the expected hold."""
+    improvement_bps = funding_bps_per_hour(new_apy - current_apy) * Decimal(str(exec_cfg.expected_hold_hours))
+    cost = Decimal(str(exec_cfg.round_trip_cost_bps))
+    ok = improvement_bps >= cost
+    log_event("gate", decision="switch" if ok else "hold", reason_code="switch_economics", symbol=symbol,
+              current_apy_pct=current_apy, new_apy_pct=new_apy, improvement_bps_over_hold=improvement_bps,
+              switch_cost_bps=cost, expected_hold_hours=exec_cfg.expected_hold_hours, ok=ok)
+    return ok
 
 
 def report_portfolio_status(
@@ -310,12 +406,16 @@ def perform_hourly_rebalance(
     cleanup_timeout_seconds: int,
     rebalance_hysteresis_pct: Decimal = Decimal("20"),
     notifier: Optional["DiscordNotifier"] = None,
+    exec_cfg: Optional[ExecutionConfig] = None,
+    basis_tracker: Optional[BasisTracker] = None,
 ) -> None:
     """
     Main strategy function to rebalance the portfolio hourly to the best opportunity.
     It closes existing positions and opens a new one based on funding and spread.
     """
     logger.info("--- Performing Hourly Rebalance ---")
+    if exec_cfg is None or basis_tracker is None:
+        raise ValueError("exec_cfg and basis_tracker are required")
 
     # 1. Find all opportunities.
     opportunities = fetch_and_compare_funding_rates(
@@ -324,6 +424,8 @@ def perform_hourly_rebalance(
     actionable_opportunities = [
         opp for opp in opportunities if opp.is_actionable and abs(opp.apy_difference) > min_apy_diff_pct
     ]
+    log_event("scan", candidates=[(o.symbol, o.long_venue, o.apy_difference, o.is_actionable) for o in opportunities],
+              actionable=len(actionable_opportunities), min_apy_diff_pct=min_apy_diff_pct)
 
     if not actionable_opportunities:
         logger.info(
@@ -334,7 +436,27 @@ def perform_hourly_rebalance(
             notifier.notify_no_opportunity(min_apy_diff_pct)
         return
 
-    best_opp = actionable_opportunities[0]
+    # 1b. Fee break-even + basis gate: first candidate (best APY first) that passes wins.
+    best_opp = None
+    gate_info = None
+    for opp in actionable_opportunities:
+        try:
+            basis_now = current_basis(aster_client, hyperliquid_client, opp.symbol)
+        except Exception as exc:
+            logger.warning("Could not read basis for %s: %s", opp.symbol, exc)
+            continue
+        basis_tracker.record_bps(opp.symbol, basis_now)  # keep history warm
+        info = evaluate_entry_gate(opp, exec_cfg, basis_tracker, basis_now)
+        if info["ok"]:
+            best_opp, gate_info = opp, info
+            break
+        logger.info("Gate skipped %s: %s (break-even %.1fh, effective cost %.1f bps)",
+                    opp.symbol, info["reason_code"], info["breakeven_hours"], info["effective_cost_bps"])
+    if best_opp is None:
+        logger.info("No candidate passed the fee/basis gate. Waiting for next cycle.")
+        if notifier:
+            notifier.notify_no_opportunity(min_apy_diff_pct)
+        return
 
     # 2. Determine effective leverage.
     effective_leverage = min(
@@ -350,11 +472,12 @@ def perform_hourly_rebalance(
 
     if _is_portfolio_matching_opportunity(hl_positions, aster_positions, best_opp):
         logger.info("Already in optimal position for imminent funding. Holding position.")
+        log_event("gate", decision="hold", reason_code="already_in_best", symbol=best_opp.symbol)
         if notifier:
             notifier.notify_holding(best_opp.symbol, abs(best_opp.apy_difference))
         return
 
-    # 3b. Hysteresis: only rebalance if new opportunity is significantly better than current.
+    # 3b. Hysteresis + switch economics: only rebalance if the improvement repays a round trip.
     current_apy = _get_current_position_apy(hl_positions, aster_positions, opportunities)
     if current_apy is not None:
         improvement = abs(best_opp.apy_difference) - current_apy
@@ -364,11 +487,20 @@ def perform_hourly_rebalance(
                 "Hysteresis threshold is %.2f%%. Holding current position.",
                 abs(best_opp.apy_difference), improvement, current_apy, rebalance_hysteresis_pct,
             )
+            log_event("gate", decision="hold", reason_code="hysteresis", symbol=best_opp.symbol,
+                      current_apy_pct=current_apy, new_apy_pct=abs(best_opp.apy_difference))
+            return
+        if not evaluate_switch_gate(current_apy, abs(best_opp.apy_difference), exec_cfg, best_opp.symbol):
+            logger.info("Switch to %s does not repay its round-trip cost over %.0fh. Holding.",
+                        best_opp.symbol, exec_cfg.expected_hold_hours)
             return
         logger.info(
             "New opportunity is %.2f%% APY better than current (%.2f%% -> %.2f%%). Rebalancing.",
             improvement, current_apy, abs(best_opp.apy_difference),
         )
+    elif hl_positions or aster_positions:
+        log_event("note", message="positions open but not matching any scanned opportunity; will close and re-enter",
+                  hl=len(hl_positions), aster=len(aster_positions))
 
     # 4. Calculate the new trade.
     decision = _calculate_trade_decision(
@@ -389,13 +521,13 @@ def perform_hourly_rebalance(
         logger.info("Closing all existing positions and orders before finding new opportunity...")
         if notifier:
             notifier.notify_trade_closed(reason="rebalancing to better opportunity")
-        cleanup_all_open_positions_and_orders(
-            aster_client, hyperliquid_client, timeout_seconds=cleanup_timeout_seconds, close_spread_ticks=spread_ticks
-        )
+        close_positions_with_execution(aster_client, hyperliquid_client, exec_cfg, context="rebalance_close",
+                                       fallback_timeout_seconds=cleanup_timeout_seconds)
         time.sleep(15)  # Allow time for balance updates after closing positions.
 
     # 6. Execute the trade.
-    execute_strategy(aster_client, hyperliquid_client, decision, notifier=notifier)
+    execute_strategy(aster_client, hyperliquid_client, decision, notifier=notifier, exec_cfg=exec_cfg,
+                     entry_basis_bps=gate_info["basis_now_bps"] if gate_info else None)
 
 
 def execute_strategy(
@@ -403,12 +535,17 @@ def execute_strategy(
     hyperliquid_client: HyperliquidClient,
     decision: StrategyDecision,
     notifier: Optional["DiscordNotifier"] = None,
+    exec_cfg: Optional[ExecutionConfig] = None,
+    entry_basis_bps: Optional[Decimal] = None,
 ) -> None:
     """
-    Executes a pre-determined strategy by setting leverage and placing orders.
+    Executes a pre-determined strategy: sets leverage, then runs both legs through
+    ``execution.execute_pair`` (imbalance/queue-aware passive-or-cross per leg).
     """
     logger.info(f"--- Executing Delta-Neutral Strategy for {decision.opportunity.symbol} ---")
-    
+    if exec_cfg is None:
+        raise ValueError("exec_cfg is required")
+
     long_venue_client = aster_client if decision.opportunity.long_venue == "Aster" else hyperliquid_client
     short_venue_client = hyperliquid_client if decision.opportunity.long_venue == "Aster" else aster_client
 
@@ -417,46 +554,24 @@ def execute_strategy(
     long_venue_client.set_leverage(decision.long_symbol, decision.leverage)
     short_venue_client.set_leverage(decision.short_symbol, decision.leverage)
 
-    # 2. Place opposing market orders
-    logger.info("Placing orders to establish positions...")
-    
-    long_qty = decision.long_qty if isinstance(long_venue_client, AsterClient) else float(decision.long_qty)
-    short_qty = decision.short_qty if isinstance(short_venue_client, AsterClient) else float(decision.short_qty)
+    # 2. Execute both legs
+    legs = [
+        Leg(long_venue_client, decision.long_symbol, "buy", decision.long_qty),
+        Leg(short_venue_client, decision.short_symbol, "sell", decision.short_qty),
+    ]
+    result = execute_pair(legs, exec_cfg, context=f"entry:{decision.opportunity.symbol}")
+    logger.info("Execution result: %s", result.summary())
 
-    long_price = decision.long_limit_price if isinstance(long_venue_client, AsterClient) else float(decision.long_limit_price)
-    short_price = decision.short_limit_price if isinstance(short_venue_client, AsterClient) else float(decision.short_limit_price)
-
-    long_order_res = long_venue_client.place_order(
-        symbol=decision.long_symbol, side="BUY", order_type="MAKER_TAKER",
-        quantity=long_qty, price=long_price,
-    )
-    logger.info(f"Long order ({decision.opportunity.long_venue}) response: {long_order_res}")
-    log_trade(
-        TRADE_LOG_PATH,
-        action="OPEN", symbol=decision.opportunity.symbol, side="BUY",
-        venue=decision.opportunity.long_venue,
-        quantity=decision.long_qty, price=decision.long_limit_price,
-        leverage=decision.leverage,
-        funding_rate=decision.opportunity.rate_aster if decision.opportunity.long_venue == "Aster" else decision.opportunity.rate_hyperliquid,
-        apy_difference=decision.opportunity.apy_difference,
-        notes=f"basis={decision.opportunity.apy_difference_basis}",
-    )
-
-    short_order_res = short_venue_client.place_order(
-        symbol=decision.short_symbol, side="SELL", order_type="MAKER_TAKER",
-        quantity=short_qty, price=short_price,
-    )
-    logger.info(f"Short order ({decision.opportunity.short_venue}) response: {short_order_res}")
-    log_trade(
-        TRADE_LOG_PATH,
-        action="OPEN", symbol=decision.opportunity.symbol, side="SELL",
-        venue=decision.opportunity.short_venue,
-        quantity=decision.short_qty, price=decision.short_limit_price,
-        leverage=decision.leverage,
-        funding_rate=decision.opportunity.rate_aster if decision.opportunity.short_venue == "Aster" else decision.opportunity.rate_hyperliquid,
-        apy_difference=decision.opportunity.apy_difference,
-        notes=f"basis={decision.opportunity.apy_difference_basis}",
-    )
+    for leg, side, venue in ((legs[0], "BUY", decision.opportunity.long_venue), (legs[1], "SELL", decision.opportunity.short_venue)):
+        if leg.filled > 0:
+            log_trade(
+                TRADE_LOG_PATH,
+                action="OPEN", symbol=decision.opportunity.symbol, side=side, venue=venue,
+                quantity=leg.filled, price=leg.avg_price or Decimal(0), leverage=decision.leverage,
+                funding_rate=decision.opportunity.rate_aster if venue == "Aster" else decision.opportunity.rate_hyperliquid,
+                apy_difference=decision.opportunity.apy_difference,
+                notes=f"basis={decision.opportunity.apy_difference_basis} | tactic={leg.plan.tactic if leg.plan else '?'}->{leg.current_tactic}",
+            )
 
     # 3. Verify positions were opened successfully.
     logger.info("Verifying positions are open and match the strategy...")
@@ -470,6 +585,14 @@ def execute_strategy(
             if _is_portfolio_matching_opportunity(hl_positions, aster_positions, decision.opportunity):
                 logger.info("Successfully verified new positions are open.")
                 verified = True
+                save_position_state({
+                    "symbol": decision.opportunity.symbol, "long_venue": decision.opportunity.long_venue,
+                    "short_venue": decision.opportunity.short_venue,
+                    "entry_basis_bps": float(entry_basis_bps) if entry_basis_bps is not None else None,
+                    "net_apy_pct": float(decision.opportunity.apy_difference),
+                    "entered_at": datetime.now(timezone.utc).isoformat(),
+                    "legs": result.summary()["legs"],
+                })
                 if notifier:
                     notifier.notify_trade_opened(
                         symbol=decision.opportunity.symbol,
@@ -522,6 +645,99 @@ def execute_strategy(
             logger.error(f"Error during partial fill rollback: {exc}")
 
     logger.info("Strategy execution complete.")
+
+
+def close_positions_with_execution(
+    aster_client: AsterClient,
+    hyperliquid_client: HyperliquidClient,
+    exec_cfg: ExecutionConfig,
+    *,
+    context: str,
+    fallback_timeout_seconds: int = 300,
+) -> None:
+    """Close every open position with reduce-only legs through execute_pair; fall back to the
+    robust cleanup routine if anything is left."""
+    legs: List[Leg] = []
+    try:
+        for pos in hyperliquid_client.get_all_positions():
+            qty = abs(Decimal(str(pos.get("contracts") or 0)))
+            if qty > 0 and pos.get("symbol"):
+                legs.append(Leg(hyperliquid_client, pos["symbol"], "sell" if pos.get("side") == "long" else "buy", qty, reduce_only=True))
+        for pos in aster_client.get_all_positions():
+            amt = Decimal(str(pos.get("positionAmt") or 0))
+            if amt != 0 and pos.get("symbol"):
+                legs.append(Leg(aster_client, pos["symbol"], "sell" if amt > 0 else "buy", abs(amt), reduce_only=True))
+    except Exception as exc:
+        logger.warning("Could not enumerate positions for execution close (%s); using cleanup", exc)
+    if legs:
+        # cancel resting orders first so reduce-only sizes are right
+        try:
+            for o in aster_client.get_all_open_orders():
+                if o.get("symbol") and o.get("orderId") is not None:
+                    aster_client.cancel_by_id(o["symbol"], str(o["orderId"]))
+            for o in hyperliquid_client.get_all_open_orders():
+                if o.get("symbol") and o.get("id"):
+                    hyperliquid_client.cancel_by_id(o["symbol"], str(o["id"]))
+        except Exception as exc:
+            logger.warning("Cancelling open orders before close failed: %s", exc)
+        result = execute_pair(legs, exec_cfg, context=context)
+        for leg in legs:
+            if leg.filled > 0:
+                base = leg.symbol.split("/")[0].replace("USDT", "")
+                log_trade(TRADE_LOG_PATH, action="CLOSE", symbol=base, side=leg.side.upper(), venue=leg.venue_name,
+                          quantity=leg.filled, price=leg.avg_price or Decimal(0),
+                          notes=f"{context} | tactic={leg.plan.tactic if leg.plan else '?'}->{leg.current_tactic}")
+        if result.hedged:
+            save_position_state(None)
+    # Whatever is left (partial, errors, no legs): robust path.
+    cleanup_all_open_positions_and_orders(aster_client, hyperliquid_client, timeout_seconds=fallback_timeout_seconds, close_spread_ticks=1)
+    save_position_state(None)
+
+
+def check_basis_exit(
+    aster_client: AsterClient,
+    hyperliquid_client: HyperliquidClient,
+    exec_cfg: ExecutionConfig,
+    tracker: BasisTracker,
+    notifier: Optional["DiscordNotifier"] = None,
+) -> bool:
+    """Close the pair when the basis has moved in our favour far enough to pay the exit and then some.
+
+    Condition: realised basis gain since entry >= exit fees + margin AND the basis is now
+    stretched against us (favorable z <= -z_exit), i.e. mean reversion would give the gain back.
+    Returns True when an exit was executed.
+    """
+    state = load_position_state()
+    if not state:
+        return False
+    symbol, long_venue = state["symbol"], state["long_venue"]
+    try:
+        now_bps = current_basis(aster_client, hyperliquid_client, symbol)
+    except Exception as exc:
+        logger.debug("basis exit check: cannot read basis for %s: %s", symbol, exc)
+        return False
+    entry = state.get("entry_basis_bps")
+    if entry is None:  # position predates the tracker: adopt the first observation as entry
+        state["entry_basis_bps"] = float(now_bps)
+        state["entry_basis_note"] = "adopted after restart"
+        save_position_state(state)
+        return False
+    gain = basis_gain_bps(Decimal(str(entry)), now_bps, long_venue)
+    stats = tracker.stats(symbol, now_bps, exec_cfg.basis_window_hours, exec_cfg.basis_min_samples)
+    fz = favorable_z(stats, long_venue)
+    threshold = Decimal(str(exec_cfg.exit_cost_bps + exec_cfg.basis_exit_min_gain_bps))
+    stretched = fz is not None and fz <= -Decimal(str(exec_cfg.z_exit))
+    if not (gain >= threshold and stretched):
+        return False
+    log_event("basis_exit", symbol=symbol, long_venue=long_venue, entry_basis_bps=entry, basis_now_bps=now_bps,
+              gain_bps=gain, threshold_bps=threshold, favorable_z=fz, z=stats.z, basis_mean_bps=stats.mean_bps,
+              basis_std_bps=stats.std_bps, samples=stats.n, net_apy_pct=state.get("net_apy_pct"))
+    logger.warning("BASIS EXIT %s: gain %.1f bps >= %.1f bps and favorable z %.2f <= -%.2f. Closing pair.",
+                   symbol, gain, threshold, fz, exec_cfg.z_exit)
+    if notifier:
+        notifier.notify_trade_closed(reason=f"basis exit on {symbol}: +{gain:.1f} bps captured")
+    close_positions_with_execution(aster_client, hyperliquid_client, exec_cfg, context=f"basis_exit:{symbol}")
+    return True
 
 
 def cleanup_all_open_positions_and_orders(

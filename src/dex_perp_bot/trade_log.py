@@ -167,7 +167,7 @@ def log_trade(
 
     # Build the entry as a single string (first line + indented continuation)
     parts = [f"- `{ts}` **{action} {symbol}** {side} on **{venue}**"]
-    parts.append(f"  Qty: {_fmt(quantity)} | Price: ${_fmt(price, 2)} | Notional: ${notional:,.2f}")
+    parts.append(f"  Qty: {_fmt(quantity)} | Price: ${_fmt(price, 6)} | Notional: ${notional:,.2f}")
     if leverage > 1:
         parts.append(f"  Leverage: {leverage}x")
 

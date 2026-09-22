@@ -125,6 +125,108 @@ class AsterClient:
             return [data]
         return data
 
+    def get_funding_info(self) -> Dict[str, int]:
+        """Return per-symbol funding interval in hours from GET /fapi/v1/fundingInfo."""
+        data = self._get_public("/fapi/v1/fundingInfo")
+        intervals: Dict[str, int] = {}
+        if isinstance(data, list):
+            for item in data:
+                symbol = item.get("symbol")
+                hours = item.get("fundingIntervalHours")
+                if symbol and hours:
+                    try:
+                        intervals[symbol] = int(hours)
+                    except (TypeError, ValueError):
+                        continue
+        return intervals
+
+    def get_income_history(self, start_time_ms: int, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Return income records (FUNDING_FEE, REALIZED_PNL, COMMISSION, ...) since start_time_ms."""
+        data = self._get_signed("/fapi/v1/income", params=[("startTime", start_time_ms), ("limit", limit)])
+        return data if isinstance(data, list) else []
+
+    # ------------------------------------------------------------------
+    # Execution primitives (shared shape with HyperliquidClient)
+    # ------------------------------------------------------------------
+    venue_name = "Aster"
+
+    def get_book(self, symbol: str, depth: int = 5) -> Dict[str, List[Tuple[Decimal, Decimal]]]:
+        """Top-of-book levels as Decimals: {"bids": [(px, qty), ...], "asks": [...]}."""
+        raw = self._get_order_book(symbol, limit=max(5, depth))
+        return {
+            "bids": [(Decimal(str(p)), Decimal(str(q))) for p, q in raw.get("bids", [])[:depth]],
+            "asks": [(Decimal(str(p)), Decimal(str(q))) for p, q in raw.get("asks", [])[:depth]],
+        }
+
+    def get_recent_trades(self, symbol: str, limit: int = 100) -> List[Tuple[float, Decimal, Decimal, str]]:
+        """Recent public trades as (ts_seconds, price, qty, aggressor side)."""
+        raw = self._get_public("/fapi/v1/trades", params={"symbol": symbol, "limit": limit})
+        out = []
+        for t in raw if isinstance(raw, list) else []:
+            # isBuyerMaker=True means the aggressor was a seller.
+            side = "sell" if t.get("isBuyerMaker") else "buy"
+            out.append((int(t.get("time", 0)) / 1000.0, Decimal(str(t.get("price"))), Decimal(str(t.get("qty"))), side))
+        return out
+
+    def get_increments(self, symbol: str) -> Tuple[Decimal, Decimal]:
+        f = self.get_symbol_filters(symbol)
+        return f["tick_size"], f["step_size"]
+
+    def place_limit(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        *,
+        post_only: bool = False,
+        ioc: bool = False,
+        reduce_only: bool = False,
+    ) -> str:
+        """Place a LIMIT order and return its order id. post_only -> GTX, ioc -> IOC, else GTC."""
+        tick, step = self.get_increments(symbol)
+        qty = (Decimal(str(quantity)) // step) * step
+        if qty <= 0:
+            raise ValueError(f"Quantity {quantity} for {symbol} rounds to zero (step {step})")
+        price_precision = -tick.normalize().as_tuple().exponent
+        qty_precision = -step.normalize().as_tuple().exponent
+        tif = "GTX" if post_only else ("IOC" if ioc else "GTC")
+        payload: List[Tuple[str, Any]] = [
+            ("symbol", symbol), ("side", side.upper()), ("type", "LIMIT"),
+            ("quantity", f"{qty:.{qty_precision}f}"), ("price", f"{Decimal(str(price)):.{price_precision}f}"),
+            ("timeInForce", tif), ("newClientOrderId", f"dxp-{uuid.uuid4().hex[:20]}"),
+        ]
+        if reduce_only:
+            payload.append(("reduceOnly", "true"))
+        resp = self._post_signed("/fapi/v1/order", body=payload)
+        order_id = resp.get("orderId")
+        if order_id is None:
+            raise DexAPIError(f"Aster order response missing orderId: {resp}")
+        return str(order_id)
+
+    def get_order_state(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        """{"status": open|filled|canceled, "filled": Decimal, "avg_price": Decimal|None, "raw": ...}"""
+        raw = self._get_signed("/fapi/v1/order", params=[("symbol", symbol), ("orderId", order_id)])
+        st = str(raw.get("status", "")).upper()
+        filled = Decimal(str(raw.get("executedQty", "0") or "0"))
+        avg = raw.get("avgPrice")
+        avg_price = Decimal(str(avg)) if avg not in (None, "", "0", "0.0", "0.00") else None
+        if st == "FILLED":
+            status = "filled"
+        elif st in ("NEW", "PARTIALLY_FILLED"):
+            status = "open"
+        else:  # CANCELED, EXPIRED (IOC remainder), REJECTED
+            status = "canceled"
+        return {"status": status, "filled": filled, "avg_price": avg_price, "raw": raw}
+
+    def cancel_by_id(self, symbol: str, order_id: str) -> None:
+        try:
+            self.cancel_order(symbol=symbol, order_id=int(order_id))
+        except DexAPIError as exc:
+            if "Unknown order" in str(exc) or "-2011" in str(exc):
+                return  # already filled or gone
+            raise
+
     def get_max_leverage(self, symbol: str) -> int:
         """Fetch maximum leverage for a symbol from leverage brackets."""
         logger.debug("Fetching leverage brackets for %s", symbol)

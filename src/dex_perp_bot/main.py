@@ -21,8 +21,60 @@ from src.dex_perp_bot.exchanges.base import DexAPIError, DexClientError
 from src.dex_perp_bot.exchanges.hyperliquid import HyperliquidClient
 from src.dex_perp_bot.notifier import DiscordNotifier
 from src.dex_perp_bot.strategy import perform_hourly_rebalance, report_portfolio_status
+from src.dex_perp_bot.status import write_status
+from src.dex_perp_bot.control import CONTROL_POLL_SECONDS, read_control, write_control
+from src.dex_perp_bot.strategy import cleanup_all_open_positions_and_orders
+from src.dex_perp_bot.strategy import check_basis_exit, load_position_state, aster_symbol, hl_symbol
+from src.dex_perp_bot.basis import BasisTracker
+from src.dex_perp_bot import funding
+from src.dex_perp_bot.funding import fetch_and_compare_funding_rates
+
+STATUS_INTERVAL_SECONDS = 300
 
 logger = logging.getLogger(__name__)
+
+
+def watchlist_symbols() -> list:
+    """Symbols worth sampling: last scan's candidates plus whatever we hold."""
+    symbols = [o.symbol for o in funding.LAST_OPPORTUNITIES]
+    state = load_position_state()
+    if state and state.get("symbol") and state["symbol"] not in symbols:
+        symbols.append(state["symbol"])
+    return symbols
+
+
+def sample_basis(aster_client, hyperliquid_client, tracker: BasisTracker) -> None:
+    """Record one Aster-vs-HL basis sample per watchlist symbol (public order books only)."""
+    for base in watchlist_symbols():
+        try:
+            a = aster_client.get_book(aster_symbol(base), depth=1)
+            h = hyperliquid_client.get_book(hl_symbol(base), depth=1)
+            if a["bids"] and a["asks"] and h["bids"] and h["asks"]:
+                tracker.record(base, (a["bids"][0][0] + a["asks"][0][0]) / 2, (h["bids"][0][0] + h["asks"][0][0]) / 2)
+        except Exception as exc:
+            logger.debug("basis sample %s failed: %s", base, exc)
+    tracker.save()
+
+
+def handle_control(aster_client, hyperliquid_client, notifier) -> str:
+    """Apply the dashboard safety switch. Returns the effective mode after handling."""
+    control = read_control()
+    mode = control.get("mode", "run")
+    if mode == "flatten":
+        logger.warning("SAFETY SWITCH: flatten requested from %s at %s. Closing everything.",
+                       control.get("by"), control.get("requested_at"))
+        notifier.notify_trade_closed(reason="safety switch: flatten requested from dashboard")
+        try:
+            cleanup_all_open_positions_and_orders(
+                aster_client, hyperliquid_client, timeout_seconds=300, close_spread_ticks=1
+            )
+            write_control("pause", by="bot", note="flattened by bot after dashboard request")
+        except Exception as exc:
+            logger.exception("Flatten failed: %s", exc)
+            notifier.notify_error(f"Flatten failed: {exc}")
+            write_control("pause", by="bot", note=f"flatten FAILED: {exc}; check positions manually")
+        return "pause"
+    return mode
 
 
 def main() -> int:
@@ -58,6 +110,15 @@ def main() -> int:
     notifier.notify_startup()
     logger.info("Starting strategy loop. Press Ctrl+C to stop.")
     last_trade_hour = -1
+    started_at = datetime.now(timezone.utc)
+    basis_tracker = BasisTracker()
+    exec_cfg = settings.execution
+    logger.info("Execution config: %s", exec_cfg)
+    try:  # seed the basis watchlist so z-scores exist by the first trading window
+        fetch_and_compare_funding_rates(aster_client, hyperliquid_client, imminent_funding_minutes=60)
+        sample_basis(aster_client, hyperliquid_client, basis_tracker)
+    except Exception as exc:
+        logger.warning("Initial scan for basis watchlist failed: %s", exc)
 
     try:
         while True:
@@ -69,7 +130,10 @@ def main() -> int:
 
                 now = datetime.now(timezone.utc)
                 # Trading window is between 10 and 40 minutes past the hour.
-                if now.hour != last_trade_hour and TRADE_WINDOW_START_MINUTE <= now.minute <= TRADE_WINDOW_END_MINUTE:
+                mode = handle_control(aster_client, hyperliquid_client, notifier)
+                if mode != "run":
+                    logger.info("Trading paused by safety switch (mode=%s). Holding.", mode)
+                elif now.hour != last_trade_hour and TRADE_WINDOW_START_MINUTE <= now.minute <= TRADE_WINDOW_END_MINUTE:
                     last_trade_hour = now.hour
                     logger.info(f"--- Entering trading window for hour {now.hour} ---")
 
@@ -108,6 +172,8 @@ def main() -> int:
                             cleanup_timeout_seconds=int(cleanup_timeout_seconds),
                             rebalance_hysteresis_pct=Decimal(str(sc.rebalance_hysteresis_pct)),
                             notifier=notifier,
+                            exec_cfg=exec_cfg,
+                            basis_tracker=basis_tracker,
                         )
                     else:
                         logger.warning("Insufficient capital to deploy. Awaiting next cycle.")
@@ -129,7 +195,36 @@ def main() -> int:
             wait_seconds = max(wait_seconds, 60)
 
             logger.info(f"Cycle complete. Waiting for {wait_seconds:.0f} seconds until next check around {next_run_time.strftime('%H:%M:%S')}...")
-            time.sleep(wait_seconds)
+            # Sleep in chunks, refreshing the dashboard status snapshot between them.
+            deadline = time.time() + wait_seconds
+            last_status = 0.0
+            last_sample = 0.0
+            while True:
+                if time.time() - last_sample >= exec_cfg.sample_interval_s:
+                    try:
+                        sample_basis(aster_client, hyperliquid_client, basis_tracker)
+                        if read_control().get("mode") == "run" and check_basis_exit(
+                            aster_client, hyperliquid_client, exec_cfg, basis_tracker, notifier
+                        ):
+                            last_status = 0.0  # refresh status after an exit
+                    except Exception as exc:
+                        logger.warning("Basis sampling / exit check failed: %s", exc)
+                    last_sample = time.time()
+                if time.time() - last_status >= STATUS_INTERVAL_SECONDS:
+                    try:
+                        write_status(aster_client, hyperliquid_client, next_window_utc=next_run_time, started_at=started_at)
+                    except Exception as exc:  # never let status reporting kill the loop
+                        logger.warning("Status snapshot failed: %s", exc)
+                    last_status = time.time()
+                try:
+                    if handle_control(aster_client, hyperliquid_client, notifier) == "pause" and read_control().get("by") == "bot":
+                        last_status = 0.0  # refresh status right after a flatten
+                except Exception as exc:
+                    logger.warning("Control check failed: %s", exc)
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                time.sleep(min(CONTROL_POLL_SECONDS, remaining))
 
     except KeyboardInterrupt:
         logger.info("Shutdown signal received. Exiting.")

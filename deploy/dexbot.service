@@ -1,0 +1,18 @@
+[Unit]
+Description=Dex Perp Bot (delta-neutral funding arb)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/home/matthieu/Dex_perp_bot/.env
+
+[Service]
+Type=simple
+User=matthieu
+WorkingDirectory=/home/matthieu/Dex_perp_bot
+ExecStart=/home/matthieu/Dex_perp_bot/.venv/bin/python -m src.dex_perp_bot.main
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+MemoryMax=600M
+
+[Install]
+WantedBy=multi-user.target

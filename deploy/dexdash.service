@@ -1,0 +1,16 @@
+[Unit]
+Description=Dex Perp Bot dashboard (LAN, port 8765)
+After=network-online.target
+
+[Service]
+Type=simple
+User=matthieu
+WorkingDirectory=/home/matthieu/Dex_perp_bot
+ExecStart=/home/matthieu/Dex_perp_bot/.venv/bin/python -m src.dex_perp_bot.dashboard
+Environment=DASHBOARD_PORT=8765
+Restart=always
+RestartSec=10
+MemoryMax=200M
+
+[Install]
+WantedBy=multi-user.target

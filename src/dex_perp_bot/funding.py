@@ -12,6 +12,9 @@ from .exchanges.hyperliquid import HyperliquidClient
 
 logger = logging.getLogger(__name__)
 
+# Last enriched scan result, exposed for status reporting.
+LAST_OPPORTUNITIES: List["FundingComparison"] = []
+
 
 @dataclass(frozen=True)
 class FundingRate:
@@ -21,6 +24,7 @@ class FundingRate:
     apy_1h: Decimal
     apy_4h: Decimal
     next_funding_time_ms: Optional[int]
+    interval_hours: int = 1
 
 
 @dataclass(frozen=True)
@@ -64,9 +68,23 @@ def _calculate_apy(rate: Decimal, periods_per_day: int) -> Decimal:
     return rate * periods_per_day * 365 * 100
 
 
+DEFAULT_ASTER_FUNDING_INTERVAL_HOURS = 8
+
+
 def _parse_aster_funding_rates(raw_rates: List[Dict], aster_client: AsterClient) -> Dict[str, FundingRate]:
-    """Parse and normalize funding rates from Aster."""
+    """Parse and normalize funding rates from Aster.
+
+    Aster settles funding at a per-symbol interval (1h/2h/4h/8h), exposed by
+    GET /fapi/v1/fundingInfo. ``apy_4h`` holds the true annualized rate of the
+    symbol's own interval; ``apy_1h`` spreads that payment over the interval
+    (used when no Aster settlement is imminent).
+    """
     parsed: Dict[str, FundingRate] = {}
+    try:
+        intervals = aster_client.get_funding_info()
+    except Exception as exc:  # pragma: no cover - network
+        logger.warning("Could not fetch Aster funding intervals, assuming %sh: %s", DEFAULT_ASTER_FUNDING_INTERVAL_HOURS, exc)
+        intervals = {}
 
     for item in raw_rates:
         symbol = item.get("symbol")
@@ -74,22 +92,25 @@ def _parse_aster_funding_rates(raw_rates: List[Dict], aster_client: AsterClient)
         next_funding_time_ms = item.get("nextFundingTime")
         if not symbol or not rate_str:
             continue
+        if not symbol.endswith("USDT"):
+            continue  # HL perps are USDC-quoted; only compare USDT-margined Aster perps
 
-        # Normalize symbol from BTCUSDT -> BTC
-        normalized_symbol = symbol.replace("USDT", "").replace("USD", "")
+        normalized_symbol = symbol[: -len("USDT")]
         rate = Decimal(rate_str)
         if rate.is_zero():
             continue
-        # Aster funding is every 4 hours (6 times a day)
-        apy_4h = _calculate_apy(rate, periods_per_day=6)
-        apy_1h = apy_4h / 4
+        interval_hours = intervals.get(symbol, DEFAULT_ASTER_FUNDING_INTERVAL_HOURS)
+        periods_per_day = 24 // interval_hours if interval_hours else 24
+        apy_period = _calculate_apy(rate, periods_per_day=periods_per_day)
+        apy_1h = apy_period / Decimal(interval_hours)
 
         parsed[normalized_symbol] = FundingRate(
             symbol=normalized_symbol,
             rate=rate,
             apy_1h=apy_1h,
-            apy_4h=apy_4h,
+            apy_4h=apy_period,
             next_funding_time_ms=next_funding_time_ms,
+            interval_hours=interval_hours,
         )
     return parsed
 
@@ -188,63 +209,42 @@ def fetch_and_compare_funding_rates(
             if 0 < time_diff_ms <= minutes_to_ms:
                 hl_funding_imminent = True
 
+        # Choose the basis: when an Aster settlement is imminent, count its full
+        # payment; otherwise spread it over its interval. HL pays every hour.
         if aster_funding_imminent:
-            # Only Aster funding is imminent. Use 4h basis.
             apy_aster_basis = aster_rate.apy_4h
-            apy_hl_basis = hyperliquid_rate.apy_1h  # still use 1h basis on HL because this is what you will really paid
             apy_basis = "4h"
-
-            if aster_rate.rate < 0:  # Negative funding on Aster -> longs get paid
-                comparisons.append(FundingComparison(
-                    symbol=symbol, long_venue="Aster", short_venue="Hyperliquid",
-                    apy_difference=apy_aster_basis - apy_hl_basis, apy_difference_basis=apy_basis,
-                    apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
-                    apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
-                    rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
-                    funding_is_imminent=aster_funding_imminent, next_funding_time_ms=aster_rate.next_funding_time_ms,
-                    long_max_leverage=None, short_max_leverage=None, is_actionable=False,
-                ))
-            elif aster_rate.rate > 0:  # Positive funding on Aster -> shorts get paid
-                comparisons.append(FundingComparison(
-                    symbol=symbol, long_venue="Hyperliquid", short_venue="Aster",
-                    apy_difference=apy_hl_basis - apy_aster_basis, apy_difference_basis=apy_basis,
-                    apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
-                    apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
-                    rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
-                    funding_is_imminent=aster_funding_imminent, next_funding_time_ms=aster_rate.next_funding_time_ms,
-                    long_max_leverage=None, short_max_leverage=None, is_actionable=False,
-                ))
-        # HL-only: Aster is not imminent, HL funding is the primary revenue, Aster is the hedge.
-        # Net APY must account for both sides (HL revenue minus Aster hedge cost).
+            imminent = True
+            next_funding_ms = aster_rate.next_funding_time_ms
         else:
             apy_aster_basis = aster_rate.apy_1h
-            apy_hl_basis = hyperliquid_rate.apy_1h
             apy_basis = "1h"
+            imminent = hl_funding_imminent
+            next_funding_ms = hyperliquid_rate.next_funding_time_ms
+        apy_hl_basis = hyperliquid_rate.apy_1h
 
-            if hyperliquid_rate.rate < 0:  # Negative funding on HL -> longs get paid
-                # Long HL (receive), Short Aster (pay if aster rate<0, receive if aster rate>0)
-                comparisons.append(FundingComparison(
-                    symbol=symbol, long_venue="Hyperliquid", short_venue="Aster",
-                    apy_difference=apy_hl_basis - apy_aster_basis, apy_difference_basis=apy_basis,
-                    apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
-                    apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
-                    rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
-                    funding_is_imminent=hl_funding_imminent, next_funding_time_ms=hyperliquid_rate.next_funding_time_ms,
-                    long_max_leverage=None, short_max_leverage=None, is_actionable=False,
-                ))
-            elif hyperliquid_rate.rate > 0:  # Positive funding on HL -> shorts get paid
-                # Long Aster (pay if aster rate>0, receive if aster rate<0), Short HL (receive)
-                comparisons.append(FundingComparison(
-                    symbol=symbol, long_venue="Aster", short_venue="Hyperliquid",
-                    apy_difference=apy_aster_basis - apy_hl_basis, apy_difference_basis=apy_basis,
-                    apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
-                    apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
-                    rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
-                    funding_is_imminent=hl_funding_imminent, next_funding_time_ms=hyperliquid_rate.next_funding_time_ms,
-                    long_max_leverage=None, short_max_leverage=None, is_actionable=False,
-                ))
+        # Net funding APY of each direction (positive = we get paid).
+        # Longs pay positive funding and receive negative funding; shorts the opposite.
+        net_long_aster_short_hl = apy_hl_basis - apy_aster_basis
+        net_long_hl_short_aster = apy_aster_basis - apy_hl_basis
+        if net_long_aster_short_hl >= net_long_hl_short_aster:
+            long_venue, short_venue, net = "Aster", "Hyperliquid", net_long_aster_short_hl
+        else:
+            long_venue, short_venue, net = "Hyperliquid", "Aster", net_long_hl_short_aster
+        if net <= 0:
+            continue
+
+        comparisons.append(FundingComparison(
+            symbol=symbol, long_venue=long_venue, short_venue=short_venue,
+            apy_difference=net, apy_difference_basis=apy_basis,
+            apy_aster_1h=aster_rate.apy_1h, apy_aster_4h=aster_rate.apy_4h,
+            apy_hyperliquid_1h=hyperliquid_rate.apy_1h, apy_hyperliquid_4h=hyperliquid_rate.apy_4h,
+            rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
+            funding_is_imminent=imminent, next_funding_time_ms=next_funding_ms,
+            long_max_leverage=None, short_max_leverage=None, is_actionable=False,
+        ))
     # Sort by the highest APY difference
-    sorted_comparisons = sorted(comparisons, key=lambda x: abs(x.apy_difference), reverse=True)
+    sorted_comparisons = sorted(comparisons, key=lambda x: x.apy_difference, reverse=True)
 
     top_opportunities = sorted_comparisons[:4]
 
@@ -295,4 +295,5 @@ def fetch_and_compare_funding_rates(
         for comp in enriched_opportunities:
             logger.info(comp)
 
+    LAST_OPPORTUNITIES[:] = enriched_opportunities
     return enriched_opportunities

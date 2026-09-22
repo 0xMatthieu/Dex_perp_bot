@@ -26,8 +26,12 @@ Delta-neutral funding rate arbitrage bot between Hyperliquid and Aster DEX perpe
 ### 1. Install dependencies
 
 ```bash
-pip install .
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r requirements.txt
+# or: pip install .
 ```
+
+Hyperliquid is accessed through `ccxt.hyperliquid` (the standalone `hyperliquid` PyPI package is not used: its bundled ccxt fork crashes in `load_markets` on some spot listings).
 
 ### 2. Configure environment
 
@@ -38,7 +42,7 @@ Copy or create a `.env` file with your credentials:
 | Variable | Description |
 |----------|-------------|
 | `HYPERLIQUID_PRIVATE_KEY` | Hyperliquid wallet private key (for signing transactions) |
-| `HYPERLIQUID_ADDRESS_WALLET` | EOA address connected to the Hyperliquid account |
+| `HYPERLIQUID_ADDRESS_WALLET` | Address of the Hyperliquid **account that holds the funds** (the master address, not the API wallet's own address). The private key may belong to an API wallet authorized on that account |
 | `ASTER_API_KEY` | Aster API key |
 | `ASTER_API_SECRET` | Aster API secret |
 
@@ -76,6 +80,87 @@ python -m src.dex_perp_bot.main
 ```
 
 The bot runs continuously. Each hour (minutes 5-55 UTC), it checks for opportunities and acts. Press `Ctrl+C` to stop.
+
+---
+
+## Execution: spread capture
+
+Entries and exits are not blind limit orders any more. Four deterministic signals (all in `microstructure.py`, unit-tested in `tests/test_microstructure.py`) drive every trade, and every input and outcome is written to `logs/decisions.jsonl` so you can see what worked:
+
+| Concept | Where | What it does |
+|---------|-------|--------------|
+| **Fee break-even gate** | `strategy.evaluate_entry_gate` | `breakeven_hours = (fees − expected basis reversion) / funding per hour`. Skip the entry if longer than `EXEC_MAX_BREAKEVEN_HOURS`. Switching positions must repay a full round trip over `EXEC_EXPECTED_HOLD_HOURS`. |
+| **Basis z-score** | `basis.BasisTracker`, `strategy.check_basis_exit` | Aster-vs-HL mid basis sampled every 30 s for the watchlist. z-score vs the rolling window feeds the gate (cheap side = enter, rich side = skip) and the **basis exit**: close when the basis moved in our favour by more than exit fees + margin and is now stretched against us (`favorable_z <= -EXEC_Z_EXIT`). |
+| **Order-book imbalance** | `execution.execute_pair` → `microstructure.plan_leg` | Top-5 `(bid−ask)/(bid+ask)`. If the book is pushing against a passive order (e.g. buying while imbalance ≥ +0.3), cross immediately instead of resting. |
+| **Queue position** | same | Quantity resting at the touch ÷ aggressive flow rate from recent trades = expected wait. Longer than `EXEC_PASSIVE_MAX_WAIT_S` → cross. Otherwise post-only at the touch, and cross the remainder when the deadline passes. |
+
+Leg risk: once one leg has filled, the other leg's deadline collapses to `EXEC_HEDGE_MAX_WAIT_S` and it is crossed (IOC limit, slippage capped at `EXEC_CROSS_CAP_BPS`). The old behaviour (unwind the filled leg after 30 s) is gone; it only survives as the last-resort fallback.
+
+Decision log kinds: `scan`, `gate`, `leg_plan`, `leg_order`, `leg_fill` (planned vs final tactic, wait, slippage vs mid at decision), `pair_result`, `basis_exit`. The dashboard's *Execution & signals* panel aggregates fill rate and average slippage per planned tactic, gate outcomes and basis exits.
+
+**Execution parameters (optional):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FEE_HL_MAKER_BPS` / `FEE_HL_TAKER_BPS` | `1.5` / `4.5` | Hyperliquid fees per fill (bps) |
+| `FEE_ASTER_MAKER_BPS` / `FEE_ASTER_TAKER_BPS` | `1.0` / `3.5` | Aster fees per fill (bps) |
+| `EXEC_MAX_BREAKEVEN_HOURS` | `8` | Skip entries that need longer to repay costs |
+| `EXEC_EXPECTED_HOLD_HOURS` | `8` | Horizon used to value a switch |
+| `EXEC_BASIS_WINDOW_HOURS` / `EXEC_BASIS_MIN_SAMPLES` | `6` / `60` | Rolling window for basis mean/std |
+| `EXEC_Z_EXIT` / `EXEC_BASIS_EXIT_MIN_GAIN_BPS` | `1.5` / `5` | Basis exit trigger |
+| `EXEC_IMBALANCE_THRESHOLD` | `0.3` | Cross when the book pushes against the passive side |
+| `EXEC_PASSIVE_MAX_WAIT_S` / `EXEC_HEDGE_MAX_WAIT_S` | `90` / `15` | Passive patience, and patience once naked |
+| `EXEC_CROSS_CAP_BPS` | `20` | Slippage cap on crossing IOC orders |
+| `EXEC_SAMPLE_INTERVAL_S` | `30` | Basis sampler cadence |
+
+---
+
+## Dashboard
+
+A zero-dependency web dashboard (Python stdlib only) shows balances, open positions, realized P&L (24h / 7d / 30d per venue: funding, trading, fees), the last funding scan, the trade report and a live tail of the bot log.
+
+```bash
+python -m src.dex_perp_bot.dashboard          # http://<host>:8765/
+DASHBOARD_PORT=9000 python -m src.dex_perp_bot.dashboard
+```
+
+It only reads `logs/status.json` (refreshed by the bot every 5 minutes), `logs/trades.md` and the latest `logs/bot_*.log`. It never touches the exchange APIs or `.env`, so it is safe to expose on the LAN. Do not expose it to the internet: there is no authentication.
+
+### Safety switch
+
+Three buttons in the dashboard header write `logs/control.json`; the bot polls it every 30 seconds:
+
+| Button | Effect |
+|--------|--------|
+| **Pause trading** | No new trades or rebalances. Open positions are held. |
+| **Close all & pause** | Bot cancels all orders and closes all positions on both venues (post-only first, market fallback), then switches itself to *pause*. |
+| **Resume** | Back to normal trading. |
+
+The switch survives bot restarts (it is a file). A flatten request is picked up within ~30 s while the bot is idle, but not while a rebalance is already executing (up to the end of the trading window). `Pause` does not stop the process: `sudo systemctl stop dexbot` does, and leaves positions open.
+
+---
+
+## Running 24/7 on the Jetson Nano
+
+The bot is deployed on the Jetson Nano at `192.168.1.19` (SSH port 1988, user `matthieu`) in `~/Dex_perp_bot`, with Python 3.12 managed by `uv` (`~/.local/bin/uv`). Two systemd units live in `deploy/` and are installed in `/etc/systemd/system/`:
+
+| Unit | What | Enabled |
+|------|------|---------|
+| `dexdash.service` | Dashboard on http://192.168.1.19:8765/ | yes, starts at boot |
+| `dexbot.service` | The trading bot | installed, **start it manually** (needs `~/Dex_perp_bot/.env`) |
+
+```bash
+# from the dev machine: copy credentials (never committed)
+scp -P 1988 .env matthieu@192.168.1.19:~/Dex_perp_bot/.env
+
+# on the Jetson
+sudo systemctl enable --now dexbot.service     # start + start at boot
+systemctl status dexbot dexdash                 # health
+journalctl -u dexbot -f                         # live log (also logs/bot_*.log)
+sudo systemctl stop dexbot.service              # stop trading (positions stay open!)
+```
+
+To redeploy after code changes: copy `src/`, `requirements.txt` and `pyproject.toml` over, then `uv pip install --python .venv/bin/python -r requirements.txt` and `sudo systemctl restart dexbot dexdash`.
 
 ---
 

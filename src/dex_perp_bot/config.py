@@ -51,6 +51,42 @@ class StrategyConfig:
 
 
 @dataclass(frozen=True)
+class ExecutionConfig:
+    """Execution / spread-capture parameters (see microstructure.py)."""
+
+    # fees (basis points of notional, per fill)
+    hl_maker_bps: float
+    hl_taker_bps: float
+    aster_maker_bps: float
+    aster_taker_bps: float
+    # fee break-even gate
+    max_breakeven_hours: float      # skip entry if funding needs longer than this to repay costs
+    expected_hold_hours: float      # horizon used to value an APY improvement when switching
+    # basis z-score
+    basis_window_hours: float
+    basis_min_samples: int
+    z_enter: float                  # favorable z above this = spread cheap for us (informational + logged)
+    z_exit: float                   # favorable z below -z_exit and gain >= exit cost -> close to capture basis
+    basis_exit_min_gain_bps: float  # extra margin over exit fees before a basis exit is taken
+    # order book / queue
+    imbalance_threshold: float
+    passive_max_wait_s: float       # give a passive leg this long before crossing
+    hedge_max_wait_s: float         # once the other leg is filled, cross this fast
+    cross_cap_bps: float            # slippage cap for IOC crossing orders
+    poll_interval_s: float
+    sample_interval_s: float        # basis sampler cadence while idle
+
+    @property
+    def round_trip_cost_bps(self) -> float:
+        """Open passive on both venues, close taker on both venues (conservative)."""
+        return self.hl_maker_bps + self.aster_maker_bps + self.hl_taker_bps + self.aster_taker_bps
+
+    @property
+    def exit_cost_bps(self) -> float:
+        return self.hl_taker_bps + self.aster_taker_bps
+
+
+@dataclass(frozen=True)
 class Settings:
     """Aggregate project configuration loaded from environment variables."""
 
@@ -58,6 +94,7 @@ class Settings:
     aster: AsterCredentials
     aster_config: AsterConfig
     strategy: StrategyConfig
+    execution: ExecutionConfig
     discord_webhook_url: Optional[str]
 
     @classmethod
@@ -114,6 +151,26 @@ class Settings:
             estimated_round_trip_cost_bps=float(os.getenv("STRATEGY_ROUND_TRIP_COST_BPS", "25")),
         )
 
+        execution_config = ExecutionConfig(
+            hl_maker_bps=float(os.getenv("FEE_HL_MAKER_BPS", "1.5")),
+            hl_taker_bps=float(os.getenv("FEE_HL_TAKER_BPS", "4.5")),
+            aster_maker_bps=float(os.getenv("FEE_ASTER_MAKER_BPS", "1.0")),
+            aster_taker_bps=float(os.getenv("FEE_ASTER_TAKER_BPS", "3.5")),
+            max_breakeven_hours=float(os.getenv("EXEC_MAX_BREAKEVEN_HOURS", "8")),
+            expected_hold_hours=float(os.getenv("EXEC_EXPECTED_HOLD_HOURS", "8")),
+            basis_window_hours=float(os.getenv("EXEC_BASIS_WINDOW_HOURS", "6")),
+            basis_min_samples=int(os.getenv("EXEC_BASIS_MIN_SAMPLES", "60")),
+            z_enter=float(os.getenv("EXEC_Z_ENTER", "1.0")),
+            z_exit=float(os.getenv("EXEC_Z_EXIT", "1.5")),
+            basis_exit_min_gain_bps=float(os.getenv("EXEC_BASIS_EXIT_MIN_GAIN_BPS", "5")),
+            imbalance_threshold=float(os.getenv("EXEC_IMBALANCE_THRESHOLD", "0.3")),
+            passive_max_wait_s=float(os.getenv("EXEC_PASSIVE_MAX_WAIT_S", "90")),
+            hedge_max_wait_s=float(os.getenv("EXEC_HEDGE_MAX_WAIT_S", "15")),
+            cross_cap_bps=float(os.getenv("EXEC_CROSS_CAP_BPS", "20")),
+            poll_interval_s=float(os.getenv("EXEC_POLL_INTERVAL_S", "3")),
+            sample_interval_s=float(os.getenv("EXEC_SAMPLE_INTERVAL_S", "30")),
+        )
+
         discord_url = os.getenv("DISCORD_WEBHOOK_URL", "").strip() or None
 
         return cls(
@@ -121,6 +178,7 @@ class Settings:
             aster=aster_credentials,
             aster_config=aster_config,
             strategy=strategy_config,
+            execution=execution_config,
             discord_webhook_url=discord_url,
         )
 

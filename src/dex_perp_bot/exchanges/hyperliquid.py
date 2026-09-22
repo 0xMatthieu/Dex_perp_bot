@@ -6,7 +6,7 @@ import logging
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from hyperliquid import HyperliquidSync
+import ccxt
 
 from .base import BalanceParsingError, DexAPIError, WalletBalance, to_decimal
 from ..config import HyperliquidCredentials
@@ -27,7 +27,7 @@ class HyperliquidClient:
         client_factory: ClientFactory | None = None,
     ) -> None:
         self._credentials = credentials
-        factory = HyperliquidSync
+        factory = client_factory or ccxt.hyperliquid
         self._client = factory(
             {
                 "privateKey": credentials.private_key,
@@ -87,6 +87,145 @@ class HyperliquidClient:
         except Exception as exc:  # pragma: no cover - defensive
             raise DexAPIError("Failed to fetch Hyperliquid predicted funding rates") from exc
         return rates
+
+    def get_funding_history(self, start_time_ms: int) -> List[Dict[str, Any]]:
+        """Funding payments credited/debited to the wallet since start_time_ms."""
+        try:
+            return self._client.publicPostInfo({
+                "type": "userFunding",
+                "user": self._credentials.wallet_address,
+                "startTime": start_time_ms,
+            }) or []
+        except Exception as exc:
+            raise DexAPIError("Failed to fetch Hyperliquid funding history") from exc
+
+    def get_fills(self, start_time_ms: int) -> List[Dict[str, Any]]:
+        """Fills (with closedPnl and fee) since start_time_ms."""
+        try:
+            return self._client.publicPostInfo({
+                "type": "userFillsByTime",
+                "user": self._credentials.wallet_address,
+                "startTime": start_time_ms,
+            }) or []
+        except Exception as exc:
+            raise DexAPIError("Failed to fetch Hyperliquid fills") from exc
+
+    # ------------------------------------------------------------------
+    # Execution primitives (shared shape with AsterClient)
+    # ------------------------------------------------------------------
+    venue_name = "Hyperliquid"
+
+    def get_book(self, symbol: str, depth: int = 5) -> Dict[str, List[Tuple[Decimal, Decimal]]]:
+        try:
+            raw = self._client.fetch_order_book(symbol)
+        except Exception as exc:
+            raise DexAPIError(f"Failed to fetch Hyperliquid order book for {symbol}") from exc
+        return {
+            "bids": [(Decimal(str(p)), Decimal(str(q))) for p, q, *_ in raw.get("bids", [])[:depth]],
+            "asks": [(Decimal(str(p)), Decimal(str(q))) for p, q, *_ in raw.get("asks", [])[:depth]],
+        }
+
+    def get_recent_trades(self, symbol: str, limit: int = 100) -> List[Tuple[float, Decimal, Decimal, str]]:
+        """Public market trades via info/recentTrades (ccxt's fetch_trades returns *our* fills when a wallet is set)."""
+        market = self._client.market(symbol)
+        coin = (market.get("info") or {}).get("name") or market.get("base")
+        try:
+            raw = self._client.publicPostInfo({"type": "recentTrades", "coin": coin}) or []
+        except Exception as exc:
+            raise DexAPIError(f"Failed to fetch Hyperliquid recent trades for {symbol}") from exc
+        out = []
+        for t in raw[-limit:]:
+            side = "buy" if str(t.get("side", "")).upper() == "B" else "sell"
+            out.append((int(t.get("time", 0)) / 1000.0, Decimal(str(t.get("px"))), Decimal(str(t.get("sz"))), side))
+        # recentTrades is capped at a handful of prints, which under-estimates flow on liquid
+        # coins. Add the last 5 one-minute candles as pseudo-trades (volume split 50/50 by side)
+        # so the queue-wait estimate is based on minutes of volume, not seconds.
+        try:
+            import time as _time
+            end_ms = int(_time.time() * 1000)
+            candles = self._client.publicPostInfo({
+                "type": "candleSnapshot",
+                "req": {"coin": coin, "interval": "1m", "startTime": end_ms - 6 * 60_000, "endTime": end_ms},
+            }) or []
+            for c in candles[-5:]:
+                vol = Decimal(str(c.get("v", "0")))
+                ts = int(c.get("t", 0)) / 1000.0
+                px = Decimal(str(c.get("c", "0")))
+                if vol > 0:
+                    out.append((ts, px, vol / 2, "buy"))
+                    out.append((ts, px, vol / 2, "sell"))
+        except Exception as exc:  # flow proxy is best-effort
+            logger.debug("candleSnapshot for %s failed: %s", coin, exc)
+        return out
+
+    def get_increments(self, symbol: str) -> Tuple[Decimal, Decimal]:
+        m = self._client.market(symbol)
+        step = Decimal(str(m["precision"]["amount"]))
+        limits_min = (m.get("limits") or {}).get("price", {}).get("min")
+        tick = Decimal(str(limits_min)) if limits_min else Decimal(str(m["precision"]["price"]))
+        return tick, step
+
+    def place_limit(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+        *,
+        post_only: bool = False,
+        ioc: bool = False,
+        reduce_only: bool = False,
+    ) -> str:
+        params: Dict[str, Any] = {}
+        if post_only:
+            params["postOnly"] = True
+        elif ioc:
+            params["timeInForce"] = "IOC"
+        if reduce_only:
+            params["reduceOnly"] = True
+        try:
+            resp = self._client.create_order(symbol, "limit", side.lower(), float(quantity), float(price), params)
+        except Exception as exc:
+            raise DexAPIError(f"Failed to place Hyperliquid limit order for {symbol}: {exc}") from exc
+        order_id = resp.get("id")
+        if not order_id:
+            raise DexAPIError(f"Hyperliquid order response missing id: {resp}")
+        return str(order_id)
+
+    def get_order_state(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        try:
+            raw = self._client.fetch_order(order_id, symbol)
+        except Exception as exc:
+            raise DexAPIError(f"Failed to fetch Hyperliquid order {order_id}: {exc}") from exc
+        st = str(raw.get("status") or "").lower()
+        filled = Decimal(str(raw.get("filled") or 0))
+        # ccxt leaves ``average`` empty for Hyperliquid; derive it from cost/filled, else the limit price.
+        avg = raw.get("average")
+        cost = raw.get("cost")
+        if avg:
+            avg_price: Optional[Decimal] = Decimal(str(avg))
+        elif cost and filled > 0:
+            avg_price = Decimal(str(cost)) / filled
+        elif filled > 0 and raw.get("price"):
+            avg_price = Decimal(str(raw.get("price")))
+        else:
+            avg_price = None
+        if st == "closed" or (raw.get("remaining") == 0 and filled > 0):
+            status = "filled"
+        elif st == "open":
+            status = "open"
+        else:
+            status = "canceled"
+        return {"status": status, "filled": filled, "avg_price": avg_price, "raw": raw}
+
+    def cancel_by_id(self, symbol: str, order_id: str) -> None:
+        try:
+            self._client.cancel_order(order_id, symbol)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "never placed" in msg or "already canceled" in msg or "filled" in msg or "not found" in msg:
+                return
+            raise DexAPIError(f"Failed to cancel Hyperliquid order {order_id}: {exc}") from exc
 
     def get_price(self, symbol: str) -> Decimal:
         """Fetch the current mid-price for a symbol."""
