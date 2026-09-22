@@ -671,6 +671,7 @@ def execute_strategy(
     short_venue_client.set_leverage(decision.short_symbol, decision.leverage)
 
     # 2. Execute both legs
+    entry_started_at = datetime.now(timezone.utc).isoformat()  # fills/fees of this entry are dated from here
     legs = [
         Leg(long_venue_client, decision.long_symbol, "buy", decision.long_qty),
         Leg(short_venue_client, decision.short_symbol, "sell", decision.short_qty),
@@ -688,7 +689,7 @@ def execute_strategy(
             "short_venue": decision.opportunity.short_venue,
             "entry_basis_bps": float(entry_basis_bps) if entry_basis_bps is not None else None,
             "net_apy_pct": float(decision.opportunity.apy_difference),
-            "entered_at": datetime.now(timezone.utc).isoformat(), "verified": False,
+            "entered_at": datetime.now(timezone.utc).isoformat(), "entry_started_at": entry_started_at, "verified": False,
             "legs": result.summary()["legs"],
         })
 
@@ -720,7 +721,7 @@ def execute_strategy(
                     "short_venue": decision.opportunity.short_venue,
                     "entry_basis_bps": float(entry_basis_bps) if entry_basis_bps is not None else None,
                     "net_apy_pct": float(decision.opportunity.apy_difference),
-                    "entered_at": datetime.now(timezone.utc).isoformat(),
+                    "entered_at": datetime.now(timezone.utc).isoformat(), "entry_started_at": entry_started_at,
                     "legs": result.summary()["legs"],
                 })
                 if notifier:

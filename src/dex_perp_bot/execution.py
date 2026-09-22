@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 MIN_HEDGE_SLICE_FRACTION = Decimal("0.2")  # hedge partial fills once they reach 20% of the leg
 MAX_REPOSTS = 200  # stop chasing the touch after this many re-posts; stay resting instead
 POST_ONLY_RETRIES = 3  # a post-only that would cross is rejected; re-read the book and try again
+MAX_PASSIVE_EXPIRIES = 10  # Aster accepts a GTX order then EXPIRES it when the touch moved through our price;
+                          # re-post this many times before giving the entry up
 _POST_ONLY_REJECT_MARKERS = ("-2026", "immediately", "post only", "post-only", "postonly", "alo", "would cross", "gtx")
 
 
@@ -71,6 +73,7 @@ class Leg:
     crossed_after_wait: bool = False
     cross_attempts: int = 0
     reposts: int = 0
+    expiries: int = 0  # post-only orders the venue accepted then expired (touch moved through our price)
     error: Optional[str] = None
     fills_log: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -401,16 +404,37 @@ def execute_pair(
         if anchor.done:
             break
         now = time.time()
-        if status == "canceled":  # IOC remainder or venue-side cancel
+        if status == "open":
+            anchor.expiries = 0
+        if status == "canceled":  # IOC remainder, post-only expired at the venue, or venue-side cancel
             if anchor.current_tactic == "cross" and anchor.cross_attempts < 4 and anchor.half_spread_bps <= Decimal(str(cfg.max_cross_half_spread_bps)):
                 try:
                     _submit(anchor, "cross", cfg, f"{context}:reprice")
                     anchor.deadline = now + max(cfg.poll_interval_s * 2, 5.0)
                 except Exception as exc:
                     anchor.error = f"cross: {exc}"
+            elif anchor.current_tactic == "passive" and anchor.expiries < MAX_PASSIVE_EXPIRIES:
+                # Aster acknowledges a GTX (post-only) order with an id and then reports it EXPIRED when the
+                # touch moved through our price between the book read and the send: no fill, no fee. The
+                # order was never ours to cancel, so this is a repost, not an abandoned entry.
+                anchor.expiries += 1
+                anchor.reposts += 1
+                anchor.order_id = None
+                logger.info("[%s] post-only %s @ %s expired at the venue (touch moved); re-posting (%d/%d)",
+                            anchor.venue_name, anchor.side.upper(), anchor.order_price, anchor.expiries, MAX_PASSIVE_EXPIRIES)
+                log_event("note", message="post-only expired at the venue, re-posting at new touch", venue=anchor.venue_name,
+                          symbol=anchor.symbol, side=anchor.side, price=anchor.order_price, attempt=anchor.expiries, context=context)
+                try:
+                    book = anchor.venue.get_book(anchor.symbol, depth=1)
+                    offset = offset_now(now - ladder_start, half_spread_bps(book["bids"], book["asks"]))
+                    _submit(anchor, "passive", cfg, f"{context}:repost", offset_bps=offset)
+                    last_repost = now
+                except Exception as exc:
+                    anchor.error = f"submit: {exc}"
             else:
                 anchor.order_id = None
-                anchor.error = anchor.error or "order cancelled by venue"
+                anchor.error = anchor.error or (f"post-only expired {anchor.expiries} times" if anchor.current_tactic == "passive"
+                                                else "order cancelled by venue")
                 break
         elif now >= anchor.deadline:
             _cancel(anchor)

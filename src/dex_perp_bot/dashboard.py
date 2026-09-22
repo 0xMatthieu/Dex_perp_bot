@@ -165,6 +165,7 @@ table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,t
 th{color:var(--muted);font-weight:500;font-size:12px}td.num,th.num{text-align:right}
 .pos{color:var(--pos)}.neg{color:var(--neg)}.muted{color:var(--muted)}.tag{display:inline-block;padding:1px 6px;border-radius:4px;font-size:11px;background:#232838}
 .tag.hl{color:#9ad1ff}.tag.aster{color:#ffd27a}
+.tile.big .v{font-size:16px}.tile .s{color:var(--muted);font-size:11px;margin-top:3px}.tile.ok{border-color:#2d6b48}.tile.warn{border-color:#7a5a1e}
 pre{margin:0;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;max-height:420px;overflow:auto;font-size:12px;line-height:1.45;font-family:ui-monospace,Consolas,monospace}
 .l-ERROR{color:var(--neg)}.l-WARNING{color:#ffb454}.overflow{overflow-x:auto}.err{color:var(--neg);font-size:12px}
 button{background:#232838;color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:4px 10px;cursor:pointer}button.danger{background:#4a1f24;border-color:#7a2e36}button:disabled{opacity:.4;cursor:default}.mode{padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600}.mode.run{background:#173b2a;color:var(--pos)}.mode.pause{background:#3d2f12;color:#ffb454}.mode.flatten{background:#4a1f24;color:var(--neg)}
@@ -173,6 +174,9 @@ button{background:#232838;color:var(--fg);border:1px solid var(--line);border-ra
 <main>
 <section><h2>Balances</h2><div class="tiles" id="balances"></div></section>
 <section><h2>P&amp;L (realized, USD)</h2><div class="overflow"><table id="pnl"></table></div><div class="muted" style="font-size:12px;margin-top:6px">Unrealized: <span id="upnl"></span></div></section>
+<section class="wide"><h2>Open trade <span class="muted" id="tradesum"></span></h2><div class="tiles" id="tradetiles"></div>
+<div class="overflow" style="margin-top:8px"><table id="tradelegs"></table></div>
+<div class="overflow" style="margin-top:8px"><table id="orders"></table></div></section>
 <section class="wide"><h2>Open positions</h2><div class="overflow"><table id="positions"></table></div></section>
 <section class="wide"><h2>Last funding scan</h2><div class="overflow"><table id="opps"></table></div></section>
 <section class="wide"><h2>Execution &amp; signals <span class="muted" id="dsum"></span></h2><div class="overflow"><table id="tactics"></table></div><div class="overflow" style="margin-top:8px"><table id="events"></table></div></section>
@@ -191,6 +195,7 @@ const $=s=>document.querySelector(s);
 const usd=v=>(v==null?'—':(v<0?'-':'')+'$'+Math.abs(v).toFixed(2));
 const cls=v=>v>0?'pos':v<0?'neg':'muted';
 const venueTag=v=>`<span class="tag ${v==='Hyperliquid'?'hl':'aster'}">${v}</span>`;
+const px=v=>v==null||v===''?'—':(String(v).length>10&&isFinite(+v)?(+v).toPrecision(7).replace(/\.?0+$/,''):v);
 const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 async function j(u){const r=await fetch(u,{cache:'no-store'});return r.json()}
 function ago(iso){if(!iso)return '—';const s=(Date.now()-new Date(iso))/1000;return s<90?Math.round(s)+'s ago':s<5400?Math.round(s/60)+'m ago':(s/3600).toFixed(1)+'h ago'}
@@ -204,9 +209,10 @@ let refresh=async function(){
   $('#pnl').innerHTML='<tr><th></th><th class=num>24h</th><th class=num>7d</th><th class=num>30d</th></tr>'+rows.map(k=>{
     const w=p[k];return `<tr><td>${k}</td>`+['24h','7d','30d'].map(x=>`<td class="num ${cls(w[x].net)}" title="funding ${usd(w[x].funding)} · trading ${usd(w[x].trading)} · fees ${usd(w[x].fees)}">${usd(w[x].net)}</td>`).join('')+'</tr>'}).join('');
   $('#upnl').innerHTML=`<span class="${cls(st.unrealized_pnl)}">${usd(st.unrealized_pnl)}</span>`;
+  renderTrade(st);
   const ps=st.positions||[];
   $('#positions').innerHTML=ps.length?'<tr><th>Venue</th><th>Symbol</th><th>Side</th><th class=num>Size</th><th class=num>Entry</th><th class=num>Mark</th><th class=num>Lev</th><th class=num>Liq.</th><th class=num>uPnL</th></tr>'+
-    ps.map(x=>`<tr><td>${venueTag(x.venue)}</td><td>${esc(x.symbol)}</td><td class="${x.side==='long'?'pos':'neg'}">${x.side}</td><td class=num>${x.size}</td><td class=num>${x.entry}</td><td class=num>${x.mark}</td><td class=num>${x.leverage||'—'}x</td><td class=num>${x.liquidation||'—'}</td><td class="num ${cls(x.unrealized_pnl)}">${usd(x.unrealized_pnl)}</td></tr>`).join('')
+    ps.map(x=>`<tr><td>${venueTag(x.venue)}</td><td>${esc(x.symbol)}</td><td class="${x.side==='long'?'pos':'neg'}">${x.side}</td><td class=num>${x.size}</td><td class=num>${px(x.entry)}</td><td class=num>${x.mark?px(x.mark):'—'}</td><td class=num>${x.leverage||'—'}x</td><td class=num>${x.liquidation?px(x.liquidation):'—'}</td><td class="num ${cls(x.unrealized_pnl)}">${usd(x.unrealized_pnl)}</td></tr>`).join('')
     :'<tr><td class=muted>No open positions</td></tr>';
   const op=st.opportunities||[];
   $('#opps').innerHTML=op.length?'<tr><th>Symbol</th><th>Long</th><th>Short</th><th class=num>Net APY</th><th>Basis</th><th>Imminent</th><th>Actionable</th><th class=num>Aster rate</th><th class=num>HL rate</th></tr>'+
@@ -254,6 +260,41 @@ let refresh=async function(){
   $('#logfile').textContent=lg.file?'· '+lg.file:'';
   const pre=$('#log');pre.innerHTML=lg.lines.map(l=>{const m=l.match(/ (ERROR|WARNING) /);return `<span class="${m?'l-'+m[1]:''}">${esc(l)}</span>`}).join('\n');pre.scrollTop=pre.scrollHeight;
   const errs=st.errors||[];$('#errsec').hidden=!errs.length;$('#errs').innerHTML=errs.map(esc).join('<br>');
+}
+const bps=v=>v==null?'—':(v>0?'+':'')+v.toFixed(1)+' bps';
+const hrs=h=>h==null?'—':h<1?Math.round(h*60)+' min':h<48?h.toFixed(1)+' h':(h/24).toFixed(1)+' d';
+function renderTrade(st){
+  const t=st.trade;const oo=st.open_orders||[];
+  const ordersHtml=oo.length?'<tr><th colspan=7>Working orders (execution in progress)</th></tr><tr><th>Venue</th><th>Symbol</th><th>Side</th><th class=num>Price</th><th class=num>Qty</th><th class=num>Filled</th><th>TIF</th></tr>'+
+    oo.map(o=>`<tr><td>${venueTag(o.venue)}</td><td>${esc(o.symbol)}</td><td class="${o.side==='buy'?'pos':'neg'}">${o.side}</td><td class=num>${o.price}</td><td class=num>${o.qty}</td><td class=num>${o.filled}</td><td class=muted>${esc(o.tif)}</td></tr>`).join(''):'';
+  $('#orders').innerHTML=ordersHtml;
+  if(!t){
+    $('#tradesum').textContent='';
+    $('#tradetiles').innerHTML=`<div class="tile big"><div class="k">Status</div><div class="v muted">${oo.length?'Entry in progress: anchor resting, no fill yet':'No open trade'}</div><div class="s">${oo.length?'':'next entry attempt at the next trading window'}</div></div>`;
+    $('#tradelegs').innerHTML='';
+    return;
+  }
+  const f=t.funding_since_entry||{},fe=t.fees_since_entry||{};
+  const gate=t.exit_threshold_bps!=null;
+  const gainOk=t.basis_gain_bps!=null&&gate&&t.basis_gain_bps>=t.exit_threshold_bps;
+  const zOk=t.favorable_z!=null&&t.z_exit!=null&&t.favorable_z<=-t.z_exit;
+  $('#tradesum').textContent=`· since ${t.entered_at?new Date(t.entered_at).toLocaleString():'—'}`+(t.verified?'':' · NOT VERIFIED (partial entry?)')+(t.entry_basis_note?' · '+t.entry_basis_note:'');
+  const tiles=[
+    ['Pair',`${esc(t.symbol)}`,`long ${t.long_venue} / short ${t.short_venue}`,'big'],
+    ['Held',hrs(t.hold_hours),`notional ${usd(t.notional_usd)} per side`,''],
+    ['Net APY at entry',t.net_apy_pct!=null?t.net_apy_pct.toFixed(1)+'%':'—',`≈ ${usd(t.funding_per_hour_usd)} / h`,''],
+    ['Funding earned',`<span class="${cls(f.total)}">${usd(f.total)}</span>`,`HL ${usd(f.hyperliquid)} · Aster ${usd(f.aster)}`,''],
+    ['Fees paid',`<span class="${cls(fe.total)}">${usd(fe.total)}</span>`,`HL ${usd(fe.hyperliquid)} · Aster ${usd(fe.aster)}`,''],
+    ['Unrealized',`<span class="${cls(t.unrealized_pnl)}">${usd(t.unrealized_pnl)}</span>`,'both legs, mark-to-market',''],
+    ['Basis entry → now',`${bps(t.entry_basis_bps)} → ${bps(t.basis_now_bps)}`,`gain <span class="${cls(t.basis_gain_bps)}">${bps(t.basis_gain_bps)}</span>`+(t.basis_mean_bps!=null?` · mean ${bps(t.basis_mean_bps)} (${t.basis_samples} samples)`:''),'big'],
+    ['Exit gate',gate?`${gainOk?'<span class=pos>gain ok</span>':'<span class=muted>gain '+bps(t.basis_gain_bps)+' < '+bps(t.exit_threshold_bps)+'</span>'}`:'—',
+      `${t.favorable_z!=null?'favorable z '+t.favorable_z.toFixed(2)+' (exit ≤ -'+t.z_exit+')':'z not ready'}${t.exit_ready?' · <b class=pos>EXIT READY</b>':''}`,t.exit_ready?'ok':(gainOk||zOk?'warn':'')],
+  ];
+  $('#tradetiles').innerHTML=tiles.map(([k,v,sub,c])=>`<div class="tile ${c}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub}</div></div>`).join('');
+  const legs=t.legs||[];
+  $('#tradelegs').innerHTML=legs.length?'<tr><th colspan=6>Entry legs</th></tr><tr><th>Venue</th><th>Side</th><th class=num>Filled</th><th class=num>Avg price</th><th>Tactic</th><th>Error</th></tr>'+
+    legs.map(l=>`<tr><td>${venueTag(l.venue)}</td><td class="${(l.side||'')==='buy'||(l.side||'')==='long'?'pos':'neg'}">${esc(l.side||'')}</td><td class=num>${l.filled??'—'}</td><td class=num>${px(l.avg_price)}</td><td class=muted>${esc(l.tactic||'')}${l.planned&&l.planned!==l.tactic?' (planned '+esc(l.planned)+')':''}</td><td class=neg>${esc(l.error||'')}</td></tr>`).join(''):'';
+  if((t.errors||[]).length)$('#tradesum').textContent+=' · '+t.errors.join('; ');
 }
 async function setMode(mode){
   const msg={pause:'Pause trading? No new trades; open positions stay open.',flatten:'CLOSE ALL POSITIONS on both venues and pause? The bot picks this up within ~30 s (longer if a rebalance is in progress).',run:'Resume trading?'}[mode];

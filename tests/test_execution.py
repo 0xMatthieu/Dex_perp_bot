@@ -24,8 +24,9 @@ class FakeVenue:
     """Passive orders fill after `passive_fills_after` polls (None = never). IOC always fills at its limit."""
 
     def __init__(self, name, bid, ask, passive_fills_after=None, fail_submit=False, partial=None, reject_post_only=0,
-                 fill_only_at_touch=False):
+                 fill_only_at_touch=False, expire_post_only=0):
         self.venue_name = name
+        self.expire_post_only = expire_post_only  # accept this many post-only orders, then report them EXPIRED (Aster GTX)
         self.fill_only_at_touch = fill_only_at_touch  # passive orders away from the touch never fill
         self.reject_post_only = reject_post_only  # reject this many post-only submits first (would cross)
         self.bid, self.ask = D(bid), D(ask)
@@ -61,6 +62,10 @@ class FakeVenue:
              "polls": 0, "filled": D(0), "status": "open"}
         if ioc:
             o.update(filled=quantity, status="filled")
+        if post_only and self.expire_post_only > 0:
+            self.expire_post_only -= 1
+            self.bid, self.ask = self.bid + D("0.00001"), self.ask + D("0.00001")  # touch moved
+            o["status"] = "canceled"  # venue acknowledged the id, then expired it: nothing filled
         self.orders[oid] = o
         self.placed.append((side, quantity, price, "post_only" if post_only else "ioc"))
         return oid
@@ -198,6 +203,29 @@ def test_post_only_rejection_gives_up_after_retries():
     r = execute_pair(legs, cfg(), max_total_s=2)
     assert not r.hedged and all(l.filled == 0 for l in legs) and not hl.placed
     assert legs[1].error and legs[1].error.startswith("submit:")
+
+
+def test_post_only_expired_after_acceptance_is_reposted():
+    """Aster GTX: the order gets an id, then shows EXPIRED because the touch moved through it (live CASHCAT 11:52 UTC)."""
+    aster = FakeVenue("Aster", "0.16754", "0.16783", passive_fills_after=1, expire_post_only=2)
+    hl = FakeVenue("Hyperliquid", "0.16761", "0.16763")
+    legs = [Leg(hl, "X", "buy", D("3000")), Leg(aster, "Y", "sell", D("3000"))]
+    r = execute_pair(legs, cfg(), max_total_s=5)
+    a = legs[1]
+    assert r.hedged and a.current_tactic == "passive" and a.error is None
+    assert a.expiries == 2 and a.reposts == 2
+    assert a.avg_price == D("0.16785")  # re-posted at the moved touch, still maker
+    assert not aster.cancelled  # nothing to cancel: the venue expired those orders itself
+
+
+def test_post_only_expiry_gives_up_after_max():
+    aster = FakeVenue("Aster", "0.16754", "0.16783", passive_fills_after=1, expire_post_only=50)
+    hl = FakeVenue("Hyperliquid", "0.16761", "0.16763")
+    legs = [Leg(hl, "X", "buy", D("3000")), Leg(aster, "Y", "sell", D("3000"))]
+    r = execute_pair(legs, cfg(), max_total_s=5)
+    assert not r.hedged and all(l.filled == 0 for l in legs) and not hl.placed
+    assert legs[1].expiries == execution.MAX_PASSIVE_EXPIRIES
+    assert legs[1].error == f"post-only expired {execution.MAX_PASSIVE_EXPIRIES} times"
 
 
 def test_anchor_ladders_from_beyond_touch_to_inside_spread():

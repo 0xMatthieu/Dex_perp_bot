@@ -129,7 +129,7 @@ def main() -> int:
         return read_control().get("mode") != "run"
 
     def on_tick() -> None:
-        write_status(aster_client, hyperliquid_client, started_at=started_at)
+        write_status(aster_client, hyperliquid_client, started_at=started_at, exec_cfg=exec_cfg, tracker=basis_tracker)
     logger.info("Execution config: %s", exec_cfg)
     try:  # seed the basis watchlist so z-scores exist by the first trading window
         fetch_and_compare_funding_rates(aster_client, hyperliquid_client, imminent_funding_minutes=60)
@@ -231,7 +231,8 @@ def main() -> int:
                     last_sample = time.time()
                 if time.time() - last_status >= STATUS_INTERVAL_SECONDS:
                     try:
-                        write_status(aster_client, hyperliquid_client, next_window_utc=next_run_time, started_at=started_at)
+                        write_status(aster_client, hyperliquid_client, next_window_utc=next_run_time, started_at=started_at,
+                                     exec_cfg=exec_cfg, tracker=basis_tracker)
                     except Exception as exc:  # never let status reporting kill the loop
                         logger.warning("Status snapshot failed: %s", exc)
                     last_status = time.time()
