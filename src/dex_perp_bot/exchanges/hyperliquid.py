@@ -88,6 +88,15 @@ class HyperliquidClient:
             raise DexAPIError("Failed to fetch Hyperliquid predicted funding rates") from exc
         return rates
 
+    def get_delisted_coins(self) -> set:
+        """Coin names flagged ``isDelisted`` in the perp universe (still present in predictedFundings)."""
+        try:
+            meta = self._client.publicPostInfo({"type": "meta"})
+        except Exception as exc:  # pragma: no cover - defensive
+            raise DexAPIError("Failed to fetch Hyperliquid meta") from exc
+        universe = meta.get("universe", []) if isinstance(meta, dict) else []
+        return {u.get("name") for u in universe if isinstance(u, dict) and u.get("isDelisted")}
+
     def get_funding_history(self, start_time_ms: int) -> List[Dict[str, Any]]:
         """Funding payments credited/debited to the wallet since start_time_ms."""
         try:

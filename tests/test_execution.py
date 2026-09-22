@@ -15,7 +15,7 @@ def cfg(**over):
                 z_enter=1.0, z_exit=1.5, basis_exit_min_gain_bps=5, imbalance_threshold=0.3,
                 passive_max_wait_s=0.2, hedge_max_wait_s=0.05, cross_cap_bps=20, max_cross_half_spread_bps=3,
                 anchor_max_wait_s=0.3, anchor_start_offset_bps=0, anchor_steps=4, repost_min_interval_s=0,
-                max_tick_bps=10, exit_max_wait_s=0.3, anchor_min_edge_bps=3, poll_interval_s=0.01, sample_interval_s=30)
+                max_tick_bps=10, max_abs_basis_bps=300, exit_max_wait_s=0.3, anchor_min_edge_bps=3, poll_interval_s=0.01, sample_interval_s=30)
     base.update(over)
     return ExecutionConfig(**base)
 

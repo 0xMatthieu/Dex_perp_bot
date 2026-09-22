@@ -15,7 +15,8 @@ from .basis import BasisTracker
 from .config import ExecutionConfig
 from .decision_log import log_event
 from .execution import Leg, execute_pair
-from .funding import FundingComparison, fetch_and_compare_funding_rates
+from .exchanges.base import DexAPIError
+from .funding import FundingComparison, LAST_GATE_REASONS, fetch_and_compare_funding_rates
 from .exchanges.aster import AsterClient
 from .exchanges.hyperliquid import HyperliquidClient
 from .microstructure import (
@@ -70,6 +71,10 @@ def market_snapshot(aster_client: AsterClient, hyperliquid_client: HyperliquidCl
     """Basis plus what execution will cost on each venue: half-spreads and tick granularity, in bps."""
     a = aster_client.get_book(aster_symbol(base), depth=1)
     h = hyperliquid_client.get_book(hl_symbol(base), depth=1)
+    if not a["bids"] or not a["asks"]:
+        raise DexAPIError(f"Aster book for {base} is empty")
+    if not h["bids"] or not h["asks"]:
+        raise DexAPIError(f"Hyperliquid book for {base} is empty (delisted or halted?)")
     mid_a = (a["bids"][0][0] + a["asks"][0][0]) / 2
     mid_h = (h["bids"][0][0] + h["asks"][0][0]) / 2
     tick_a, _ = aster_client.get_increments(aster_symbol(base))
@@ -183,29 +188,36 @@ def evaluate_entry_gate(
     crossing = 2 * hedge_cross_bps(snapshot) if snapshot else Decimal(0)
     tick_bps = max(snapshot["tick_aster_bps"], snapshot["tick_hl_bps"]) if snapshot else Decimal(0)
     effective_cost = fee_cost + crossing - reversion
-    hours = breakeven_hours(effective_cost, opp.apy_difference)
+    # First hour pays the next-hour rate (imminent Aster settlement counted whole), later hours the steady rate.
+    steady, next_hour = opp.apy_steady, opp.apy_next_hour
+    hours = breakeven_hours(effective_cost, steady, next_hour)
     tick_ok = tick_bps <= Decimal(str(exec_cfg.max_tick_bps))
-    ok = hours <= exec_cfg.max_breakeven_hours and tick_ok
-    if not tick_ok:
+    basis_ok = abs(basis_now_bps) <= Decimal(str(exec_cfg.max_abs_basis_bps))
+    ok = hours <= exec_cfg.max_breakeven_hours and tick_ok and basis_ok
+    if not basis_ok:
+        reason_code = "basis_out_of_range"  # same ticker, different contract/units on the two venues
+    elif not tick_ok:
         reason_code = "tick_too_coarse"
     elif ok:
         reason_code = "ok"
-    elif reversion < 0 and breakeven_hours(fee_cost + crossing, opp.apy_difference) <= exec_cfg.max_breakeven_hours:
+    elif reversion < 0 and breakeven_hours(fee_cost + crossing, steady, next_hour) <= exec_cfg.max_breakeven_hours:
         reason_code = "adverse_basis"
-    elif breakeven_hours(fee_cost, opp.apy_difference) <= exec_cfg.max_breakeven_hours:
+    elif breakeven_hours(fee_cost, steady, next_hour) <= exec_cfg.max_breakeven_hours:
         reason_code = "spread_too_wide"
     else:
         reason_code = "breakeven_too_long"
     info = {
         "symbol": opp.symbol, "long_venue": opp.long_venue, "net_apy_pct": opp.apy_difference,
-        "funding_bps_per_hour": funding_bps_per_hour(opp.apy_difference),
+        "apy_next_hour_pct": next_hour, "apy_steady_pct": steady,
+        "funding_bps_per_hour": funding_bps_per_hour(steady),
+        "funding_bps_next_hour": funding_bps_per_hour(next_hour),
         "fee_cost_bps": fee_cost, "hedge_crossing_bps": crossing, "tick_bps": tick_bps,
         "half_spread_aster_bps": snapshot["half_spread_aster_bps"] if snapshot else None,
         "half_spread_hl_bps": snapshot["half_spread_hl_bps"] if snapshot else None,
         "basis_now_bps": basis_now_bps, "basis_mean_bps": stats.mean_bps,
         "basis_std_bps": stats.std_bps, "basis_samples": stats.n, "z": stats.z, "favorable_z": fz,
         "expected_reversion_bps": reversion, "reversion_prior": "history" if stats.z is not None else "mean0",
-        "effective_cost_bps": effective_cost,
+        "effective_cost_bps": effective_cost, "max_abs_basis_bps": exec_cfg.max_abs_basis_bps,
         "breakeven_hours": hours, "max_breakeven_hours": exec_cfg.max_breakeven_hours,
         "ok": ok, "reason_code": reason_code,
     }
@@ -535,6 +547,9 @@ def perform_hourly_rebalance(
     ]
     log_event("scan", candidates=[(o.symbol, o.long_venue, o.apy_difference, o.is_actionable) for o in opportunities],
               actionable=len(actionable_opportunities), min_apy_diff_pct=min_apy_diff_pct)
+    for o in opportunities:
+        LAST_GATE_REASONS[o.symbol] = "not_actionable" if not o.is_actionable else (
+            "below_min_apy" if abs(o.apy_difference) <= min_apy_diff_pct else "not_evaluated")
 
     if not actionable_opportunities:
         logger.info(
@@ -556,11 +571,15 @@ def perform_hourly_rebalance(
             logger.warning("Could not read books for %s: %s", opp.symbol, exc)
             log_event("gate", decision="skip", reason_code="books_unavailable", symbol=opp.symbol,
                       long_venue=opp.long_venue, net_apy_pct=opp.apy_difference, error=str(exc)[:200])
+            LAST_GATE_REASONS[opp.symbol] = "books_unavailable"
             continue
-        basis_tracker.record_bps(opp.symbol, basis_now)  # keep history warm
+        if abs(basis_now) <= Decimal(str(exec_cfg.max_abs_basis_bps)):
+            basis_tracker.record_bps(opp.symbol, basis_now)  # keep history warm (never with mismatched-contract prints)
         info = evaluate_entry_gate(opp, exec_cfg, basis_tracker, basis_now, snap)
+        LAST_GATE_REASONS[opp.symbol] = info["reason_code"]
         if info["ok"]:
             best_opp, gate_info = opp, info
+            LAST_GATE_REASONS[opp.symbol] = "selected"
             break
         logger.info("Gate skipped %s: %s (break-even %.1fh, effective cost %.1f bps)",
                     opp.symbol, info["reason_code"], info["breakeven_hours"], info["effective_cost_bps"])

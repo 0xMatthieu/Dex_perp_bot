@@ -80,6 +80,7 @@ class ExecutionConfig:
     anchor_min_edge_bps: float      # ... down to this distance from mid (inside the spread on wide books)
     repost_min_interval_s: float    # do not chase the touch more often than this
     max_tick_bps: float             # skip symbols whose price tick is coarser than this on either venue
+    max_abs_basis_bps: float        # skip when |Aster mid - HL mid| exceeds this: same ticker, different contract
     exit_max_wait_s: float          # patience for the passive leg when closing (exits are time-sensitive)
     poll_interval_s: float
     sample_interval_s: float        # basis sampler cadence while idle
@@ -187,6 +188,7 @@ class Settings:
             anchor_min_edge_bps=float(os.getenv("EXEC_ANCHOR_MIN_EDGE_BPS", "3")),
             repost_min_interval_s=float(os.getenv("EXEC_REPOST_MIN_INTERVAL_S", "10")),
             max_tick_bps=float(os.getenv("EXEC_MAX_TICK_BPS", "10")),
+            max_abs_basis_bps=float(os.getenv("EXEC_MAX_ABS_BASIS_BPS", "300")),
             exit_max_wait_s=float(os.getenv("EXEC_EXIT_MAX_WAIT_S", "120")),
             poll_interval_s=float(os.getenv("EXEC_POLL_INTERVAL_S", "3")),
             sample_interval_s=float(os.getenv("EXEC_SAMPLE_INTERVAL_S", "30")),

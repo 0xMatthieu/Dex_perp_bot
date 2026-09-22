@@ -304,8 +304,10 @@ def write_status(
     snap["opportunities"] = [
         {
             "symbol": o.symbol, "long_venue": o.long_venue, "short_venue": o.short_venue,
-            "net_apy": _f(o.apy_difference), "basis": o.apy_difference_basis,
+            "net_apy": _f(o.apy_difference), "apy_next_hour": _f(o.apy_next_hour), "apy_steady": _f(o.apy_steady),
+            "basis": o.apy_difference_basis,
             "imminent": o.funding_is_imminent, "actionable": o.is_actionable,
+            "gate": funding.LAST_GATE_REASONS.get(o.symbol),
             "rate_aster": _f(o.rate_aster), "rate_hyperliquid": _f(o.rate_hyperliquid),
         }
         for o in funding.LAST_OPPORTUNITIES

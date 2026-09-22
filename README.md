@@ -89,7 +89,7 @@ Entries and exits are not blind limit orders any more. Four deterministic signal
 
 | Concept | Where | What it does |
 |---------|-------|--------------|
-| **Fee break-even gate** | `strategy.evaluate_entry_gate` | `breakeven_hours = (fees − expected basis reversion) / funding per hour`. Skip the entry if longer than `EXEC_MAX_BREAKEVEN_HOURS`. Switching positions must repay a full round trip over `EXEC_EXPECTED_HOLD_HOURS`. |
+| **Fee break-even gate** | `strategy.evaluate_entry_gate` | Every scan row carries two APYs: **next-hour** (an Aster settlement due within the hour counts its whole 1h/4h/8h payment; this ranks candidates) and **steady** (the Aster payment spread over its interval; what every later hour pays). `breakeven_hours`: the first hour repays at the next-hour rate, the remainder at the steady rate, against `fees + hedge crossing − expected basis reversion`. Skip the entry if longer than `EXEC_MAX_BREAKEVEN_HOURS`. A |basis| above `EXEC_MAX_ABS_BASIS_BPS` is rejected as `basis_out_of_range` (same ticker, different contract on the two venues, e.g. MEME) and never enters the basis history; coins Hyperliquid flags `isDelisted` are dropped from the scan. Switching positions must repay a full round trip over `EXEC_EXPECTED_HOLD_HOURS`. |
 | **Basis z-score** | `basis.BasisTracker`, `strategy.check_basis_exit` | Aster-vs-HL mid basis sampled every 30 s for the watchlist. z-score vs the rolling window feeds the gate (cheap side = enter, rich side = skip) and the **basis exit**: close when the basis moved in our favour by more than exit fees + margin and is now stretched against us (`favorable_z <= -EXEC_Z_EXIT`). |
 | **Order-book imbalance** | `execution.execute_pair` → `microstructure.plan_leg` | Top-5 `(bid−ask)/(bid+ask)`. If the book is pushing against a passive order (e.g. buying while imbalance ≥ +0.3), cross immediately instead of resting. |
 | **Queue position** | same | Quantity resting at the touch ÷ aggressive flow rate from recent trades = expected wait. Longer than `EXEC_PASSIVE_MAX_WAIT_S` → cross. Otherwise post-only at the touch, and cross the remainder when the deadline passes. |
@@ -105,6 +105,7 @@ Decision log kinds: `scan`, `gate`, `leg_plan`, `leg_order`, `leg_fill` (planned
 | `FEE_HL_MAKER_BPS` / `FEE_HL_TAKER_BPS` | `1.5` / `4.5` | Hyperliquid fees per fill (bps) |
 | `FEE_ASTER_MAKER_BPS` / `FEE_ASTER_TAKER_BPS` | `0.0` / `4.0` | Aster fees per fill (bps, both observed live: maker fills were charged 0) |
 | `EXEC_MAX_BREAKEVEN_HOURS` | `8` | Skip entries that need longer to repay costs |
+| `EXEC_MAX_ABS_BASIS_BPS` | `300` | Skip when the Aster-vs-HL mid basis is wider than this (mismatched contracts) |
 | `EXEC_EXPECTED_HOLD_HOURS` | `8` | Horizon used to value a switch |
 | `EXEC_BASIS_WINDOW_HOURS` / `EXEC_BASIS_MIN_SAMPLES` | `6` / `60` | Rolling window for basis mean/std |
 | `EXEC_Z_EXIT` / `EXEC_BASIS_EXIT_MIN_GAIN_BPS` | `1.5` / `5` | Basis exit trigger |

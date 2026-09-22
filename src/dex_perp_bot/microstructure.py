@@ -141,14 +141,27 @@ def funding_bps_per_hour(net_apy_pct: Decimal) -> Decimal:
     return net_apy_pct / Decimal(100) * BPS / HOURS_PER_YEAR
 
 
-def breakeven_hours(cost_bps: Decimal, net_apy_pct: Decimal) -> float:
-    """Hours of funding needed to repay ``cost_bps`` (fees minus expected basis gain). inf if no income."""
-    hourly = funding_bps_per_hour(net_apy_pct)
-    if hourly <= 0:
-        return math.inf
+def breakeven_hours(cost_bps: Decimal, net_apy_pct: Decimal, first_hour_apy_pct: Optional[Decimal] = None) -> float:
+    """Hours of funding needed to repay ``cost_bps`` (fees minus expected basis gain). inf if no income.
+
+    ``net_apy_pct`` is the steady-state rate earned every hour. ``first_hour_apy_pct``, when given,
+    is what the *next* hour pays instead (an imminent Aster settlement counts its whole 4h/8h payment
+    in that hour): the first hour repays at that rate, the remainder at the steady rate.
+    """
     if cost_bps <= 0:
         return 0.0
-    return float(cost_bps / hourly)
+    steady = funding_bps_per_hour(net_apy_pct)
+    if first_hour_apy_pct is None:
+        if steady <= 0:
+            return math.inf
+        return float(cost_bps / steady)
+    windfall = funding_bps_per_hour(first_hour_apy_pct)
+    if windfall > 0 and cost_bps <= windfall:
+        return float(cost_bps / windfall)
+    remaining = cost_bps - max(windfall, Decimal(0))
+    if steady <= 0:
+        return math.inf
+    return 1.0 + float(remaining / steady)
 
 
 # ---------------------------------------------------------------------------

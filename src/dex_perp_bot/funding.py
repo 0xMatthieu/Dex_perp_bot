@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 # Last enriched scan result, exposed for status reporting.
 LAST_OPPORTUNITIES: List["FundingComparison"] = []
+# Why each scanned symbol was (not) picked in the last cycle, keyed by symbol; filled by the strategy.
+LAST_GATE_REASONS: Dict[str, str] = {}
 
 
 @dataclass(frozen=True)
@@ -33,8 +35,8 @@ class FundingComparison:
     symbol: str
     long_venue: str
     short_venue: str
-    apy_difference: Decimal
-    apy_difference_basis: str  # "1h" or "4h"
+    apy_difference: Decimal        # next-hour net APY: an imminent Aster settlement counts its whole payment (ranking key)
+    apy_difference_basis: str      # e.g. "aster 8h" (settlement within the hour) or "hourly avg (8h)"
     apy_aster_1h: Decimal
     apy_aster_4h: Decimal
     apy_hyperliquid_1h: Decimal
@@ -46,6 +48,11 @@ class FundingComparison:
     long_max_leverage: Optional[int]
     short_max_leverage: Optional[int]
     is_actionable: bool
+    apy_steady: Decimal = Decimal(0)  # same direction, Aster payment spread over its interval: what every later hour pays
+
+    @property
+    def apy_next_hour(self) -> Decimal:
+        return self.apy_difference
 
     def __str__(self) -> str:
         imminent_str = " (IMMINENT)" if self.funding_is_imminent else ""
@@ -57,7 +64,8 @@ class FundingComparison:
         )
         return (
             f"Long {self.symbol} on {self.long_venue}, Short on {self.short_venue}: "
-            f"APY Difference ({self.apy_difference_basis} basis) = {self.apy_difference:.4f}%{imminent_str}{actionable_str} | {leverage_str} | {details_str}"
+            f"APY Difference ({self.apy_difference_basis} basis) = {self.apy_difference:.4f}% "
+            f"(steady {self.apy_steady:.4f}%){imminent_str}{actionable_str} | {leverage_str} | {details_str}"
         )
 
 
@@ -116,14 +124,25 @@ def _parse_aster_funding_rates(raw_rates: List[Dict], aster_client: AsterClient)
 
 
 def _parse_hyperliquid_funding_rates(raw_rates: List, hyperliquid_client: HyperliquidClient) -> Dict[str, FundingRate]:
-    """Parse and normalize funding rates from Hyperliquid."""
+    """Parse and normalize funding rates from Hyperliquid.
+
+    ``predictedFundings`` still lists delisted coins (rate 0, empty book); those are dropped so a
+    live Aster rate cannot show up as a phantom one-sided opportunity.
+    """
     parsed: Dict[str, FundingRate] = {}
+    try:
+        delisted = hyperliquid_client.get_delisted_coins()
+    except Exception as exc:  # pragma: no cover - network
+        logger.warning("Could not fetch Hyperliquid delisted coins: %s", exc)
+        delisted = set()
     for asset_data in raw_rates:
         if not isinstance(asset_data, list) or len(asset_data) < 2:
             continue
         symbol = asset_data[0]
         venues = asset_data[1]
         if not isinstance(venues, list):
+            continue
+        if symbol in delisted:
             continue
 
         hl_venue_data = next((v for v in venues if isinstance(v, list) and len(v) > 1 and v[0] == "HlPerp"), None)
@@ -229,8 +248,10 @@ def fetch_and_compare_funding_rates(
         net_long_hl_short_aster = apy_aster_basis - apy_hl_basis
         if net_long_aster_short_hl >= net_long_hl_short_aster:
             long_venue, short_venue, net = "Aster", "Hyperliquid", net_long_aster_short_hl
+            steady = apy_hl_basis - aster_rate.apy_1h
         else:
             long_venue, short_venue, net = "Hyperliquid", "Aster", net_long_hl_short_aster
+            steady = aster_rate.apy_1h - apy_hl_basis
         if net <= 0:
             continue
 
@@ -242,6 +263,7 @@ def fetch_and_compare_funding_rates(
             rate_aster=aster_rate.rate, rate_hyperliquid=hyperliquid_rate.rate,
             funding_is_imminent=imminent, next_funding_time_ms=next_funding_ms,
             long_max_leverage=None, short_max_leverage=None, is_actionable=False,
+            apy_steady=steady,
         ))
     # Sort by the highest APY difference
     sorted_comparisons = sorted(comparisons, key=lambda x: x.apy_difference, reverse=True)
@@ -286,6 +308,7 @@ def fetch_and_compare_funding_rates(
             long_max_leverage=long_leverage,
             short_max_leverage=short_leverage,
             is_actionable=is_actionable,
+            apy_steady=comp.apy_steady,
         ))
 
     logger.info("\n--- Top 4 Funding Rate Arbitrage Opportunities ---")
@@ -296,4 +319,5 @@ def fetch_and_compare_funding_rates(
             logger.info(comp)
 
     LAST_OPPORTUNITIES[:] = enriched_opportunities
+    LAST_GATE_REASONS.clear()
     return enriched_opportunities
