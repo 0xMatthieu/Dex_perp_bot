@@ -73,6 +73,67 @@ def _hl_pnl(funding_recs: List[Dict[str, Any]], fills: List[Dict[str, Any]], now
     return out
 
 
+CLOSE_CLUSTER_MS = 30 * 60 * 1000  # close fills of one symbol this close together belong to the same exit (passive closes can trickle)
+
+
+def _closed_trades(aster_income: List[Dict[str, Any]], hl_funding: List[Dict[str, Any]],
+                   hl_fills: List[Dict[str, Any]], limit: int = 50) -> List[Dict[str, Any]]:
+    """Per-round-trip P&L from the venues' own records (not the trade report, which can miss legs).
+
+    For each symbol, every cluster of closing events (HL ``Close ...`` fills, Aster REALIZED_PNL) ends a round
+    trip; everything booked for that symbol since the previous exit (price P&L, fees, funding, both venues)
+    belongs to it. Newest first."""
+    events: Dict[str, List[Dict[str, Any]]] = {}  # base symbol -> [{t, venue, kind, amount, closing, notional}]
+
+    def add(base: str, t: int, venue: str, kind: str, amount: float, closing: bool = False, notional: float = 0.0) -> None:
+        if base:
+            events.setdefault(base, []).append({"t": t, "venue": venue, "kind": kind, "amount": amount,
+                                                "closing": closing, "notional": notional})
+
+    for f in hl_fills:
+        base, t = str(f.get("coin") or ""), int(f.get("time", 0))
+        closing = str(f.get("dir") or "").startswith("Close")
+        add(base, t, "hyperliquid", "trading", _f(f.get("closedPnl")), closing,
+            _f(f.get("sz")) * _f(f.get("px")) if closing else 0.0)
+        add(base, t, "hyperliquid", "fees", -_f(f.get("fee")))
+    for rec in hl_funding:
+        d = rec.get("delta") or {}
+        add(str(d.get("coin") or ""), int(rec.get("time", 0)), "hyperliquid", "funding", _f(d.get("usdc")))
+    kinds = {"REALIZED_PNL": "trading", "COMMISSION": "fees", "FUNDING_FEE": "funding"}
+    for rec in aster_income:
+        kind = kinds.get(rec.get("incomeType", ""))
+        sym = str(rec.get("symbol") or "")
+        if kind and sym:
+            add(sym[:-4] if sym.endswith("USDT") else sym, int(rec.get("time", 0)), "aster", kind,
+                _f(rec.get("income")), kind == "trading")
+
+    trips: List[Dict[str, Any]] = []
+    for base, evs in events.items():
+        evs.sort(key=lambda e: e["t"])
+        # Exit clusters: each starts at a closing event more than CLOSE_CLUSTER_MS after the previous exit.
+        exits: List[List[int]] = []
+        for e in evs:
+            if e["closing"]:
+                if exits and e["t"] - exits[-1][1] <= CLOSE_CLUSTER_MS:
+                    exits[-1][1] = e["t"]
+                else:
+                    exits.append([e["t"], e["t"]])
+        prev_end = -1
+        for _, end in exits:
+            span = [e for e in evs if prev_end < e["t"] <= end]
+            prev_end = end
+            trip = {"symbol": base, "opened_ms": span[0]["t"], "closed_ms": end,
+                    "venues": sorted({e["venue"] for e in span if e["closing"]}),
+                    "close_notional": sum(e["notional"] for e in span), "trading": 0.0, "fees": 0.0, "funding": 0.0}
+            for e in span:
+                trip[e["kind"]] += e["amount"]
+            trip["net"] = trip["trading"] + trip["fees"] + trip["funding"]
+            trip["hours"] = (end - trip["opened_ms"]) / 3_600_000
+            trips.append(trip)
+    trips.sort(key=lambda t: t["closed_ms"], reverse=True)
+    return trips[:limit]
+
+
 def _positions(aster_client: AsterClient, hl_client: HyperliquidClient) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for pos in hl_client.get_all_positions():
@@ -293,6 +354,10 @@ def write_status(
                                now_ms, exec_cfg, tracker)
     except Exception as exc:
         snap["errors"].append(f"trade: {exc}")
+    try:
+        snap["closed_trades"] = _closed_trades(aster_income, hl_funding, hl_fills)
+    except Exception as exc:
+        snap["errors"].append(f"closed trades: {exc}")
     if snap["pnl"]:
         total: Dict[str, Dict[str, float]] = {}
         for w in PNL_WINDOWS_HOURS:
